@@ -6,8 +6,9 @@ import asyncio
 
 import pytest
 
-from finance_agent.api import dependencies as deps
-from finance_agent.api.routers import auth as auth_routes
+from app.core import dependencies as deps
+from app.routers import user as auth_routes
+from app.services import user_service
 
 
 class _FakeRequest:
@@ -33,9 +34,9 @@ class _Store:
 
 @pytest.fixture()
 def store(monkeypatch):
-    from finance_agent.api import dependencies as deps
+    from app.core import dependencies as deps
 
-    monkeypatch.setattr(auth_routes, "get_user_store", lambda: _Store())
+    monkeypatch.setattr(user_service, "get_user_store", lambda: _Store())
     monkeypatch.setattr(deps, "get_user_store", lambda: _Store())
     monkeypatch.setattr(deps, "ADMIN_CUSTOMER_IDS", {"ADMIN1"})
 
@@ -60,9 +61,10 @@ def test_me_exposes_is_admin_false_for_regular_user(store):
 
 
 def test_is_admin_is_whitelist_only_and_case_insensitive(monkeypatch):
-    from finance_agent.api import dependencies as deps
+    from app.core import dependencies as deps
 
     monkeypatch.setattr(deps, "ADMIN_CUSTOMER_IDS", {"ADMIN1"})
+    monkeypatch.setattr(deps, "get_user_store", lambda: type("S", (), {"is_admin": lambda self, cid: False})())
 
     assert deps._is_admin("admin1") is True
     assert deps._is_admin("ADMIN1") is True
@@ -70,8 +72,78 @@ def test_is_admin_is_whitelist_only_and_case_insensitive(monkeypatch):
 
 
 def test_no_admin_configured_means_nobody_is_admin(monkeypatch):
-    from finance_agent.api import dependencies as deps
+    from app.core import dependencies as deps
 
     monkeypatch.setattr(deps, "ADMIN_CUSTOMER_IDS", set())
+    monkeypatch.setattr(deps, "get_user_store", lambda: type("S", (), {"is_admin": lambda self, cid: False})())
 
     assert deps._is_admin("ADMIN1") is False
+
+
+def test_require_user_rejects_admin(monkeypatch):
+    from fastapi import HTTPException
+
+    from app.core import dependencies as deps
+
+    class _Store:
+        def verify_token(self, token):
+            return "ADMIN1"
+
+        def is_admin(self, customer_id):
+            return True
+
+    monkeypatch.setattr(deps, "get_user_store", lambda: _Store())
+    monkeypatch.setattr(deps, "ADMIN_CUSTOMER_IDS", set())
+
+    with pytest.raises(HTTPException) as exc:
+        deps.require_user(_FakeRequest({"Authorization": "Bearer admin-token"}))
+    assert exc.value.status_code == 403
+    assert "管理接口" in exc.value.detail
+
+
+def test_require_admin_rejects_regular_user(monkeypatch):
+    from fastapi import HTTPException
+
+    from app.core import dependencies as deps
+
+    class _Store:
+        def verify_token(self, token):
+            return "USER1"
+
+        def is_admin(self, customer_id):
+            return False
+
+    monkeypatch.setattr(deps, "get_user_store", lambda: _Store())
+    monkeypatch.setattr(deps, "ADMIN_CUSTOMER_IDS", set())
+
+    with pytest.raises(HTTPException) as exc:
+        deps.require_admin(_FakeRequest({"Authorization": "Bearer user-token"}))
+    assert exc.value.status_code == 403
+
+
+@pytest.mark.parametrize("guard", [deps.require_user, deps.require_admin])
+def test_role_store_failure_makes_auth_guard_unavailable(monkeypatch, guard):
+    from fastapi import HTTPException
+
+    class _FailingRoleStore(_Store):
+        def is_admin(self, customer_id):
+            raise RuntimeError("database unavailable")
+
+    monkeypatch.setattr(deps, "get_user_store", lambda: _FailingRoleStore())
+    monkeypatch.setattr(deps, "ADMIN_CUSTOMER_IDS", set())
+
+    with pytest.raises(HTTPException) as exc:
+        guard(_FakeRequest({"Authorization": "Bearer user-token"}))
+    assert exc.value.status_code == 503
+
+
+def test_is_admin_does_not_turn_role_store_failure_into_regular_user(monkeypatch):
+    class _FailingRoleStore:
+        def is_admin(self, customer_id):
+            raise RuntimeError("database unavailable")
+
+    monkeypatch.setattr(deps, "get_user_store", lambda: _FailingRoleStore())
+    monkeypatch.setattr(deps, "ADMIN_CUSTOMER_IDS", set())
+
+    with pytest.raises(RuntimeError, match="database unavailable"):
+        deps.is_admin("ADMIN1")

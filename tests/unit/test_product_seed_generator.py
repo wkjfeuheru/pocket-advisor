@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from finance_agent.cli.generate_product_seed import SeedError, build_sql, sql_literal
+from scripts.generate_product_seed import SeedError, build_sql, sql_literal
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -125,7 +125,7 @@ def test_cli_rejects_invalid_input_without_writing_output(work_dir):
     output = work_dir / "out.sql"
 
     completed = subprocess.run(
-        [sys.executable, "-m", "finance_agent.cli.generate_product_seed",
+        [sys.executable, "-m", "scripts.generate_product_seed",
          "--input", str(bad_input), "--output", str(output)],
         capture_output=True, text=True, cwd=str(REPO_ROOT),
     )
@@ -139,8 +139,8 @@ def test_cli_generates_from_sample_data(work_dir):
     output = work_dir / "seed.sql"
 
     completed = subprocess.run(
-        [sys.executable, "-m", "finance_agent.cli.generate_product_seed",
-         "--input", str(REPO_ROOT / "finance_agent" / "cli" / "data" / "products.sample.json"),
+        [sys.executable, "-m", "scripts.generate_product_seed",
+         "--input", str(REPO_ROOT / "scripts" / "data" / "products.sample.json"),
          "--output", str(output)],
         capture_output=True, text=True, cwd=str(REPO_ROOT),
     )

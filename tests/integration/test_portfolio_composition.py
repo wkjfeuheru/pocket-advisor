@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from finance_agent.application import portfolio_service
+from app.services import portfolio_service
 
 
 def test_portfolio_factory_injects_shared_store_and_library(monkeypatch):
@@ -22,8 +22,8 @@ def test_portfolio_factory_injects_shared_store_and_library(monkeypatch):
     store = Store()
     library = Library()
     monkeypatch.setattr(portfolio_service, "_service", None)
-    monkeypatch.setattr(portfolio_service, "get_portfolio_store", lambda: store)
-    monkeypatch.setattr(portfolio_service, "get_product_library", lambda: library)
+    monkeypatch.setattr("app.crud.portfolio_crud.get_portfolio_store", lambda: store)
+    monkeypatch.setattr("app.crud.product_crud.get_product_library", lambda: library)
 
     service = portfolio_service.get_portfolio_service()
 
@@ -31,4 +31,3 @@ def test_portfolio_factory_injects_shared_store_and_library(monkeypatch):
     assert service.store is store
     assert service.library is library
     assert service.nav_source.latest_nav("110011").nav == 1.25
-

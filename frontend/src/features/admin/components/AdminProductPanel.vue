@@ -8,7 +8,7 @@
 import { computed, onMounted, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { adminErrorMessage, listAllProducts, offlineProduct, publishProduct, saveProduct } from '@/features/admin/api'
-import type { ProductView } from '@/features/portfolio/types'
+import { PRODUCT_TYPES, productTypeLabel, type ProductView } from '@/features/product/types'
 
 const products = ref<ProductView[]>([])
 const loading = ref(false)
@@ -60,7 +60,7 @@ const offlineCount = computed(() => products.value.filter(item => !item.is_activ
 async function load() {
   loading.value = true
   try {
-    products.value = (await listAllProducts()).products
+    products.value = (await listAllProducts('all')).products
     authorized.value = true
   } catch (error: any) {
     // 403 代表当前用户不是管理员，不渲染任何管理入口。
@@ -208,7 +208,7 @@ onMounted(load)
           <el-tag v-if="!item.is_active" type="info" size="small" effect="plain">已下架</el-tag>
         </div>
         <p class="product-meta">
-          {{ item.type }} · {{ item.risk_level || '风险等级未披露' }} ·
+          {{ productTypeLabel(item.type) }} · {{ item.risk_level || '风险等级未披露' }} ·
           净值 {{ item.nav.value ?? '未披露' }}
         </p>
       </div>
@@ -238,6 +238,14 @@ onMounted(load)
       <div class="product-form">
         <el-input v-model="form.code" :disabled="isEditing" placeholder="商品代码（如 110011）" aria-label="商品代码" />
         <el-input v-model="form.name" placeholder="商品名称" aria-label="商品名称" />
+        <el-select v-model="form.type" placeholder="商品类型" aria-label="商品类型" style="width: 100%">
+          <el-option
+            v-for="item in PRODUCT_TYPES"
+            :key="item.value"
+            :label="item.label"
+            :value="item.value"
+          />
+        </el-select>
         <el-input v-model="form.company" placeholder="基金公司" aria-label="基金公司" />
         <el-input v-model="form.manager" placeholder="基金经理" aria-label="基金经理" />
         <el-input v-model="form.risk_level" placeholder="风险等级（如 R3 中风险）" aria-label="风险等级" />

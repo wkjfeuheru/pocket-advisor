@@ -5,14 +5,14 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "finance-agent"
 version = "2.1.0"
-description = "金融智能投顾系统 —— 基于多 Agent 的 A 股投资顾问"
+description = "金融投顾业务系统 —— 模拟交易（商品 / 持仓 / 账户 / 认证 / 管理）"
 readme = "README.md"
 requires-python = ">=3.10"
 license = {text = "MIT"}
 authors = [
     {name = "Finance Agent Team"}
 ]
-keywords = ["finance", "investment", "multi-agent", "langgraph", "a-shares"]
+keywords = ["finance", "investment", "portfolio", "fastapi", "a-shares"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Financial and Insurance Industry",
@@ -22,25 +22,22 @@ classifiers = [
     "Programming Language :: Python :: 3.13",
 ]
 dependencies = [
-    "langchain>=1.4.2",
-    "langgraph>=1.2.12",
-    "langgraph-checkpoint-postgres>=3.1.2",
+    "sqlalchemy>=2.0",
     "psycopg[binary]>=3.3.6",
-    "psycopg-pool>=3.3.3",
-    "langchain-community>=0.4.2",
-    "langchain-deepseek>=1.1.1",
+    "psycopg-pool>=3.2",
     "python-dotenv>=1.2.3",
-    "redis>=7.4.0",
     "fastapi>=0.141.1",
     "uvicorn[standard]>=0.54.0",
-    "pandas>=2.2.0",
-    "numpy>=1.26.0",
     "pydantic>=2.13.5",
-    "requests>=2.33.1",
-    "mcp>=2.2.0",
-    "httpx2>=2.0.0",
-    "sentence-transformers>=6.1.0",
-    "celery>=5.6.3",
+    "langchain>=1.0,<2",
+    "langgraph>=1.0,<2",
+    "langchain-openai>=1.0,<2",
+    "langchain-mcp-adapters>=0.1,<1",
+    "langgraph-checkpoint-postgres>=2,<4",
+    "mcp>=1.24,<2",
+    "tushare>=1.4",
+    "apscheduler>=3.10,<4",
+    "tzdata>=2024.1",
 ]
 
 [project.optional-dependencies]
@@ -49,23 +46,16 @@ dev = [
     "pytest-asyncio",
     "httpx",
 ]
-# 本地股票数据源（AKShare / BaoStock）；Tushare 走 MCP，无需额外安装。
-providers = [
-    "akshare>=1.10.0",
-    "baostock>=0.8.8",
-]
 [tool.setuptools.packages.find]
-include = ["finance_agent*"]
+include = ["app*", "scripts*"]
 
-# 领域 system prompt 与规则 JSON 是非 .py 资源，必须显式声明随包分发，
-# 否则构建出的 wheel 里会缺失，导致生产环境提示词/规则加载失败。
+# 产品种子样例 JSON 随包分发，便于运维生成 007 种子脚本。
 [tool.setuptools.package-data]
-finance_agent = ["**/*.md", "**/*.json"]
+scripts = ["data/*.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
 markers = [
     "network: 需要真实第三方接口的冒烟测试（默认跳过，设置 RUN_NETWORK_TESTS=1 启用）",
-    "celery_integration: 需要 Redis 与 Celery worker 的集成测试（默认跳过，设置 RUN_CELERY_INTEGRATION=1 启用）",
 ]

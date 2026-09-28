@@ -1,82 +1,127 @@
-/** 对话与会话 API。 */
+/** 投顾 REST 与 POST SSE。SSE 使用 fetch，以便携带 Bearer token。 */
 
 import { http } from '@/api/client'
-import { streamSSE } from '@/api/sse'
-import type {
-  ChatRequest,
-  ChatResponse,
-  Conversation,
-  ConversationListResponse,
-  HistoryMessage,
-  HistoryResponse,
-  HealthResponse,
-  StreamCallbacks,
-} from '@/features/chat/types'
-import type { ProfileResponse } from '@/features/auth/types'
+import { getToken } from '@/app/session'
+import { parseSseBuffer, type SseEvent } from './sse'
 
-export async function chat(req: ChatRequest): Promise<ChatResponse> {
-  const { data } = await http.post<ChatResponse>('/chat', req)
+export interface SessionItem {
+  id: string
+  title: string
+  created_at: string
+  updated_at: string
+}
+
+export interface ChatMessage {
+  id: string
+  request_id: string
+  role: string
+  content: string
+  created_at: string
+  public_metadata?: {
+    artifacts?: Record<string, unknown>[]
+    candidate_stocks?: Record<string, unknown>[]
+    warnings?: string[]
+  }
+}
+
+export interface Profile {
+  risk_level: string | null
+  investment_horizon: string | null
+  investment_goal: string | null
+  liquidity_need: string | null
+  budget_amount: number | null
+}
+
+export interface RunRecord {
+  request_id: string
+  session_id: string
+  status: string
+  stage: string
+  final_answer: string
+  error_code: string
+  retryable: boolean
+  interrupt_payload: {
+    missing_fields?: string[]
+    profile?: Profile
+    kind?: string
+    reason?: string
+    question?: string
+    fields?: string[]
+    options?: { id: string; label: string }[]
+  } | null
+}
+
+export async function listSessions(): Promise<SessionItem[]> {
+  const { data } = await http.get<SessionItem[]>('/agents/sessions')
   return data
 }
 
-export function chatStream(req: ChatRequest, callbacks: StreamCallbacks, signal?: AbortSignal): Promise<void> {
-  return streamSSE('/chat/stream', req, callbacks, signal)
-}
-
-export interface RunStatusPayload {
-  run_status: string
-  response?: string
-  conversation_id?: string
-  warnings?: string[]
-}
-
-export async function getRunStatus(taskId: string): Promise<RunStatusPayload> {
-  const { data } = await http.get<RunStatusPayload>(`/runs/${encodeURIComponent(taskId)}`)
+export async function listMessages(sessionId: string): Promise<ChatMessage[]> {
+  const { data } = await http.get<ChatMessage[]>(`/agents/sessions/${sessionId}/messages`)
   return data
 }
 
-export async function stopChat(conversationId: string, runId = ''): Promise<void> {
-  await http.post('/chat/stop', null, {
-    params: { conversation_id: conversationId, run_id: runId },
+export async function deleteSession(sessionId: string): Promise<void> {
+  await http.delete(`/agents/sessions/${sessionId}`)
+}
+
+export async function getProfile(): Promise<Profile> {
+  const { data } = await http.get<Profile>('/agents/profile')
+  return data
+}
+
+export async function saveProfile(patch: Partial<Profile>): Promise<Profile> {
+  const { data } = await http.patch<Profile>('/agents/profile', patch)
+  return data
+}
+
+export async function getRun(requestId: string): Promise<RunRecord> {
+  const { data } = await http.get<RunRecord>(`/agents/runs/${requestId}`)
+  return data
+}
+
+export async function consumeSse(
+  path: string,
+  body: unknown,
+  onEvent: (event: SseEvent) => void,
+  signal?: AbortSignal,
+): Promise<void> {
+  const token = getToken()
+  const response = await fetch(`/api${path}`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: token ? `Bearer ${token}` : '',
+    },
+    body: JSON.stringify(body),
+    signal,
   })
-}
-
-export async function healthCheck(): Promise<HealthResponse> {
-  const { data } = await http.get<HealthResponse>('/health')
-  return data
-}
-
-export async function getProfile(customerId: string): Promise<ProfileResponse> {
-  const { data } = await http.get<ProfileResponse>(`/profile/${customerId}`)
-  return data
-}
-
-export async function getHistory(customerId: string, limit = 50): Promise<HistoryResponse> {
-  const { data } = await http.get<HistoryResponse>(`/history/${customerId}`, { params: { limit } })
-  return data
-}
-
-export async function createConversation(customerId: string): Promise<Conversation> {
-  const { data } = await http.post<Conversation>(`/conversations/${customerId}`)
-  return data
-}
-
-export async function getConversations(customerId: string): Promise<ConversationListResponse> {
-  const { data } = await http.get<ConversationListResponse>(`/conversations/${customerId}`)
-  return data
-}
-
-export async function getConversationMessages(
-  customerId: string,
-  conversationId: string,
-  limit = 100,
-): Promise<{ conversation_id: string; messages: HistoryMessage[] }> {
-  const { data } = await http.get(`/conversations/${customerId}/${conversationId}/messages`, {
-    params: { limit },
-  })
-  return data
-}
-
-export async function deleteConversation(customerId: string, conversationId: string): Promise<void> {
-  await http.delete(`/conversations/${customerId}/${conversationId}`)
+  if (!response.ok) {
+    let detail = '请求失败'
+    try {
+      const payload = await response.json()
+      detail = payload.detail || detail
+    } catch {
+      detail = response.statusText || detail
+    }
+    const error = new Error(detail) as Error & { status?: number }
+    error.status = response.status
+    throw error
+  }
+  const reader = response.body?.getReader()
+  if (!reader) throw new Error('响应没有正文')
+  const decoder = new TextDecoder()
+  let buffer = ''
+  while (true) {
+    const { value, done } = await reader.read()
+    if (done) break
+    buffer += decoder.decode(value, { stream: true })
+    const parsed = parseSseBuffer(buffer)
+    buffer = parsed.rest
+    for (const event of parsed.events) onEvent(event)
+  }
+  if (buffer.trim()) {
+    const parsed = parseSseBuffer(`${buffer}\n\n`)
+    for (const event of parsed.events) onEvent(event)
+  }
 }

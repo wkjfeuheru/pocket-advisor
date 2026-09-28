@@ -1,4 +1,4 @@
-"""Domain policy settings should honor .env regardless of ASGI import order."""
+"""业务策略设置应无论 ASGI 导入顺序都遵循 .env。"""
 
 from __future__ import annotations
 
@@ -13,20 +13,14 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 DOMAIN_ENV_NAMES = {
     "PORTFOLIO_MAX_DEPOSIT_AMOUNT",
     "PORTFOLIO_MIN_ORDER_AMOUNT",
-    "ALLOCATION_RISK_FREE_RATE",
-    "ALLOCATION_WEIGHT_MIN",
-    "ALLOCATION_WEIGHT_MAX",
 }
 
 
 def test_asgi_import_loads_domain_policy_values_from_dotenv(work_dir: Path) -> None:
-    """Importing the ASGI app first must not freeze domain defaults before .env loads."""
+    """先导入 ASGI 应用也不能在 .env 加载前冻结领域默认值。"""
     dotenv_values = {
         "PORTFOLIO_MAX_DEPOSIT_AMOUNT": "7654321.5",
         "PORTFOLIO_MIN_ORDER_AMOUNT": "17.25",
-        "ALLOCATION_RISK_FREE_RATE": "0.031",
-        "ALLOCATION_WEIGHT_MIN": "0.11",
-        "ALLOCATION_WEIGHT_MAX": "0.72",
     }
     (work_dir / ".env").write_text(
         "\n".join(f"{name}={value}" for name, value in dotenv_values.items()),
@@ -38,20 +32,14 @@ def test_asgi_import_loads_domain_policy_values_from_dotenv(work_dir: Path) -> N
         for name, value in os.environ.items()
         if name not in DOMAIN_ENV_NAMES
     }
-    child_env.update({
-        "DEEPSEEK_API_KEY": "test-key",
-        "PYTHONPATH": str(REPO_ROOT),
-    })
+    child_env.update({"PYTHONPATH": str(REPO_ROOT)})
     script = """
 import json
-import finance_agent.api.app
-from finance_agent.domains.portfolio import settings
+import app.main
+from app.core import config as settings
 print(json.dumps({
     "PORTFOLIO_MAX_DEPOSIT_AMOUNT": settings.PORTFOLIO_MAX_DEPOSIT_AMOUNT,
     "PORTFOLIO_MIN_ORDER_AMOUNT": settings.PORTFOLIO_MIN_ORDER_AMOUNT,
-    "ALLOCATION_RISK_FREE_RATE": settings.ALLOCATION_RISK_FREE_RATE,
-    "ALLOCATION_WEIGHT_MIN": settings.ALLOCATION_WEIGHT_MIN,
-    "ALLOCATION_WEIGHT_MAX": settings.ALLOCATION_WEIGHT_MAX,
 }))
 """
     result = subprocess.run(

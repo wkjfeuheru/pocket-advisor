@@ -1,6 +1,7 @@
 /** 管理后台 API 封装：商品发行/上下架、用户与持仓总览。
  *
- * 与 portfolio.ts 同构：Bearer token 由拦截器注入，403 代表当前用户不是管理员。
+ * 与用户端同构：Bearer token 由拦截器注入，403 代表当前用户不是管理员。
+ * 写入 DTO 只在本文件；只读货架/账户类型从用户 feature 引用，不复制口径。
  */
 
 import { http } from '@/api/client'
@@ -11,8 +12,7 @@ import type {
   AdminUserListResponse,
   AdminUserPortfolioResponse,
 } from '@/features/admin/types'
-import type { ProductView } from '@/features/portfolio/types'
-import type { ClearRecordsResponse } from '@/features/auth/types'
+import type { ProductView } from '@/features/product/types'
 
 /** 后端把业务失败写成 detail；面板统一用它做提示，403 用于隐藏入口。 */
 export function adminErrorMessage(error: any, fallback = '请求失败'): string {
@@ -20,16 +20,6 @@ export function adminErrorMessage(error: any, fallback = '请求失败'): string
 }
 
 const ADMIN_BASE = '/admin'
-
-export async function clearRecords(
-  customerId?: string,
-  keepUsers = true,
-): Promise<ClearRecordsResponse> {
-  const { data } = await http.post<ClearRecordsResponse>(`${ADMIN_BASE}/clear-records`, null, {
-    params: { customer_id: customerId, keep_users: keepUsers },
-  })
-  return data
-}
 
 /** 全站用户及账户概览 */
 export async function listUsers(): Promise<AdminUserListResponse> {

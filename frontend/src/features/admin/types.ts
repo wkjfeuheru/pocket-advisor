@@ -1,4 +1,5 @@
-import type { AccountSnapshot, PositionView, ProductView } from '../portfolio/types'
+import type { AccountSnapshot, PositionView } from '../portfolio/types'
+import type { ProductView } from '../product/types'
 
 // ── 管理后台 ──────────────────────────────────────────────────
 

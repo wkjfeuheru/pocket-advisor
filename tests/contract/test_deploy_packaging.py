@@ -4,16 +4,28 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from finance_agent.infrastructure.persistence.postgres.schema import (
-    FAQ_SCHEMA_APPLY_ORDER,
+import tomllib
+from packaging.requirements import Requirement
+
+from app.db.schema import (
     SCHEMA_APPLY_ORDER,
     SEED_SCHEMA_FILES,
-    VECTOR_EXTENSION_SQL,
     _load_sql,
     apply_postgres_schema,
 )
 
 ROOT = Path(__file__).resolve().parents[2]
+
+
+def test_requirements_txt_covers_all_declared_direct_dependencies():
+    project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]
+    declared = {Requirement(item).name.lower() for item in project["dependencies"]}
+    deployed = {
+        Requirement(line).name.lower()
+        for line in (ROOT / "requirements.txt").read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    }
+    assert declared <= deployed
 
 
 class _FakeCursor:
@@ -48,53 +60,47 @@ class _FakeConnection:
 
 
 def test_apply_postgres_schema_executes_in_canonical_order():
-    """migrate / 懒建表共用同一函数：先结构，再 vector 扩展，再 FAQ。"""
+    """migrate / 懒建表共用同一函数：按唯一清单顺序执行结构脚本。"""
     connection = _FakeConnection()
-    apply_postgres_schema(connection, include_faq=True, include_seed=False)
+    apply_postgres_schema(connection, include_seed=False)
 
     seen = connection.cursor_instance.statements
     core = [_load_sql(name) for name in SCHEMA_APPLY_ORDER]
-    faq = [_load_sql(name) for name in FAQ_SCHEMA_APPLY_ORDER]
-    assert seen[: len(core)] == core
-    assert seen[len(core)] == VECTOR_EXTENSION_SQL
-    assert seen[len(core) + 1 :] == faq
+    assert seen == core
 
 
 def test_apply_postgres_schema_seed_is_opt_in():
     connection = _FakeConnection()
-    apply_postgres_schema(connection, include_faq=True, include_seed=True)
+    apply_postgres_schema(connection, include_seed=True)
     assert connection.cursor_instance.statements[-1] == _load_sql(SEED_SCHEMA_FILES[0])
 
 
-def test_apply_postgres_schema_can_skip_faq():
+def test_apply_postgres_schema_without_seed_skips_seed():
     connection = _FakeConnection()
-    apply_postgres_schema(connection, include_faq=False, include_seed=False)
-    seen = connection.cursor_instance.statements
-    assert seen == [_load_sql(name) for name in SCHEMA_APPLY_ORDER]
-    assert VECTOR_EXTENSION_SQL not in seen
+    apply_postgres_schema(connection, include_seed=False)
+    assert _load_sql(SEED_SCHEMA_FILES[0]) not in connection.cursor_instance.statements
 
 
 def test_migrate_main_commits_on_success(monkeypatch):
     connection = _FakeConnection()
     monkeypatch.setattr(
-        "finance_agent.infrastructure.settings.get_postgres_connection_factory",
+        "app.core.config.get_postgres_connection_factory",
         lambda: (lambda: connection),
     )
-    from finance_agent.cli.migrate import main
+    from scripts.migrate import main
 
     assert main([]) == 0
     assert connection.committed is True
     assert connection.closed is True
     assert connection.cursor_instance.statements[0] == _load_sql(SCHEMA_APPLY_ORDER[0])
-    assert VECTOR_EXTENSION_SQL in connection.cursor_instance.statements
 
 
 def test_migrate_main_exits_nonzero_on_failure(monkeypatch, capsys):
     def _boom():
         raise RuntimeError("POSTGRES_PASSWORD 或 POSTGRES_DSN 必须配置")
 
-    monkeypatch.setattr("finance_agent.infrastructure.settings.get_postgres_connection_factory", _boom)
-    from finance_agent.cli.migrate import main
+    monkeypatch.setattr("app.core.config.get_postgres_connection_factory", _boom)
+    from scripts.migrate import main
 
     assert main(["--seed"]) == 1
     captured = capsys.readouterr()
@@ -132,23 +138,18 @@ def _load_compose(text: str) -> dict:
 
 def test_compose_declares_process_model_and_api_binds_all_interfaces():
     text = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
-    data = _load_compose(text)
-    services = data["services"]
-    for name in ("postgres", "redis", "migrate", "api", "celery", "web"):
+    services = _load_compose(text)["services"]
+    for name in ("postgres", "migrate", "api", "web"):
         assert name in services, f"docker-compose.yml 缺少服务 {name}"
+    # 投顾/量化层已移除：不再有 celery / redis 服务。
+    assert "celery" not in services
+    assert "redis" not in services
     api = services["api"]
     command = api.get("command")
-    if isinstance(command, list):
-        command_text = " ".join(str(part) for part in command)
-    else:
-        command_text = str(command or "")
+    command_text = " ".join(str(part) for part in command) if isinstance(command, list) else str(command or "")
     assert "0.0.0.0" in command_text
     assert "uvicorn" in command_text
-    celery = services["celery"]
-    celery_cmd = celery.get("command")
-    celery_text = " ".join(str(part) for part in celery_cmd) if isinstance(celery_cmd, list) else str(celery_cmd or "")
-    assert "finance.quant" in celery_text
-    assert "finance_agent.infrastructure.jobs.celery_app:celery_app" in celery_text
+    assert "app.main:app" in command_text
 
 
 def test_dockerfile_installs_from_lock_and_listens_publicly():
@@ -156,11 +157,19 @@ def test_dockerfile_installs_from_lock_and_listens_publicly():
     assert "requirements.lock" in dockerfile
     assert "--host 0.0.0.0" in dockerfile or '"0.0.0.0"' in dockerfile
     assert "DEEPSEEK_API_KEY" not in dockerfile
+    assert "app.main:app" in dockerfile
+    # 业务代码收进 app/ 包；旧的顶层领域目录不再单独 COPY。
+    assert "COPY tools" not in dockerfile
+    assert "COPY cli" not in dockerfile
+    assert "COPY auth" not in dockerfile
+    assert "COPY product" not in dockerfile
+    assert "COPY portfolio" not in dockerfile
+    assert "COPY admin" not in dockerfile
+    assert "COPY app" in dockerfile
+    assert "COPY scripts" in dockerfile
 
 
 def test_diagnose_schema_files_follow_migrate_order():
-    from finance_agent.cli.diagnose_schema_drift import SCHEMA_FILES
+    from scripts.diagnose_schema_drift import SCHEMA_FILES
 
-    assert "007_product_seed.sql" not in SCHEMA_FILES
-    assert "012_faq_qa_pair_columns.sql" in SCHEMA_FILES
-    assert SCHEMA_FILES == list(SCHEMA_APPLY_ORDER) + list(FAQ_SCHEMA_APPLY_ORDER)
+    assert SCHEMA_FILES == list(SCHEMA_APPLY_ORDER)

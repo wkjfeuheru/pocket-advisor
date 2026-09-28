@@ -5,17 +5,17 @@ from __future__ import annotations
 from fastapi import HTTPException
 from starlette.requests import Request
 
-from finance_agent.api.errors import http_500, sse_error_message
-from finance_agent.api.rate_limit import SlidingWindowLimiter, enforce_auth_rate_limit
-from finance_agent.infrastructure.persistence.postgres.auth_store import (
+from app.utils.errors import http_500
+from app.utils.rate_limit import SlidingWindowLimiter, enforce_auth_rate_limit
+from app.crud.user_crud import (
     WEAK_PASSWORDS,
     _validate_password,
 )
-from finance_agent.infrastructure.persistence.postgres.connection import (
+from app.core.security import (
     UniqueConstraintError,
     is_unique_violation,
 )
-from finance_agent.api.app import app
+from app.main import app
 
 
 def test_http_500_does_not_leak_exception_text():
@@ -25,12 +25,6 @@ def test_http_500_does_not_leak_exception_text():
     assert "secret" not in error.detail
     assert "postgres://" not in error.detail
     assert "稍后重试" in error.detail
-
-
-def test_sse_error_does_not_leak_exception_text():
-    message = sse_error_message(RuntimeError("DB_PASSWORD=hunter2"))
-    assert "hunter2" not in message
-    assert "DB_PASSWORD" not in message
 
 
 def test_unique_violation_detects_sqlstate_and_psycopg_shape():
@@ -75,7 +69,7 @@ def test_auth_rate_limit_returns_429(monkeypatch):
         def allow(self, key: str) -> bool:
             return False
 
-    monkeypatch.setattr("finance_agent.api.rate_limit.get_auth_limiter", lambda: _Limiter())
+    monkeypatch.setattr("app.utils.rate_limit.get_auth_limiter", lambda: _Limiter())
     scope = {
         "type": "http",
         "asgi": {"version": "3.0"},
@@ -99,7 +93,7 @@ def test_auth_rate_limit_returns_429(monkeypatch):
 
 
 def test_production_disables_openapi_docs():
-    from finance_agent.infrastructure.settings import IS_PRODUCTION
+    from app.core.config import IS_PRODUCTION
 
     if IS_PRODUCTION:
         assert app.docs_url is None

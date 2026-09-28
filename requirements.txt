@@ -1,29 +1,18 @@
 # 直接依赖：下限为已知可用版本。完整钉死版本见 requirements.lock（Docker 按 lock 安装）。
-langchain>=1.4.2
-langgraph>=1.2.12
-langgraph-checkpoint-postgres>=3.1.2
+sqlalchemy>=2.0
 psycopg[binary]>=3.3.6
-psycopg-pool>=3.3.3
-langchain-community>=0.4.2
-langchain-deepseek>=1.1.1
+psycopg-pool>=3.2
 python-dotenv>=1.2.3
-redis>=7.4.0
 fastapi>=0.141.1
 uvicorn[standard]>=0.54.0
-
-mcp>=2.2.0
-httpx2>=2.0.0
-pandas>=2.2.0
-numpy>=1.26.0
 pydantic>=2.13.5
-requests>=2.33.1
-
-# FAQ 本地中文 embedding（默认 CPU，不联网下载模型）
-sentence-transformers>=6.1.0
-
-# CPU 密集量化计算的独立 worker（独立 Redis DB + finance.quant 队列）
-celery>=5.6.3
-
-# 可选本地股票数据源：pip install -e ".[providers]"（Tushare 走 MCP，无需额外安装）
-# akshare>=1.10.0
-# baostock>=0.8.8
+langchain>=1.0,<2
+langgraph>=1.0,<2
+langchain-openai>=1.0,<2
+langchain-mcp-adapters>=0.1,<1
+langgraph-checkpoint-postgres>=2,<4
+mcp>=1.24,<2
+tushare>=1.4
+# 日频净值同步的进程内调度。时区用标准库 zoneinfo + tzdata，不引入 pytz。
+apscheduler>=3.10,<4
+tzdata>=2024.1

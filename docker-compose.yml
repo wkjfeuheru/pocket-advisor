@@ -1,6 +1,6 @@
 services:
   postgres:
-    image: pgvector/pgvector:pg16
+    image: postgres:16-bookworm
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-postgres}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
@@ -14,23 +14,12 @@ services:
       retries: 20
     restart: unless-stopped
 
-  redis:
-    image: redis:7-alpine
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 5s
-      timeout: 3s
-      retries: 20
-    restart: unless-stopped
-
   migrate:
     build:
       context: .
       dockerfile: Dockerfile
-      args:
-        INSTALL_PROVIDERS: "1"
     image: finance-agent-api:local
-    command: ["python", "-m", "finance_agent.cli.migrate", "--seed"]
+    command: ["python", "-m", "scripts.migrate", "--seed"]
     env_file:
       - .env
     environment: &app-environment
@@ -39,16 +28,20 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-postgres}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
       POSTGRES_DB: ${POSTGRES_DB:-advisor}
-      REDIS_URL: redis://redis:6379/0
       UVICORN_HOST: "0.0.0.0"
       UVICORN_PORT: "8000"
       APP_ENV: ${APP_ENV:-production}
       TRUST_PROXY: ${TRUST_PROXY:-true}
       CORS_ALLOW_ORIGINS: ${CORS_ALLOW_ORIGINS:-}
-      FAQ_EMBEDDING_DEVICE: cpu
-      FAQ_EMBEDDING_MODEL_CACHE_DIR: /app/.cache/models
       FINANCE_SQL_DIR: /app/migrations
-      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:?set DEEPSEEK_API_KEY in .env}
+      ADVISOR_MODEL_API_KEY: ${ADVISOR_MODEL_API_KEY:-}
+      ADVISOR_MODEL_BASE_URL: ${ADVISOR_MODEL_BASE_URL:-https://api.deepseek.com}
+      ADVISOR_MODEL_NAME: ${ADVISOR_MODEL_NAME:-deepseek-chat}
+      FUYAO_API_KEY: ${FUYAO_API_KEY:-}
+      TUSHARE_TOKEN: ${TUSHARE_TOKEN:-}
+      AGENT_TURN_TIMEOUT_SECONDS: ${AGENT_TURN_TIMEOUT_SECONDS:-120}
+      AGENT_MAX_MESSAGE_CHARS: ${AGENT_MAX_MESSAGE_CHARS:-4000}
+      AGENT_CONTEXT_MESSAGE_LIMIT: ${AGENT_CONTEXT_MESSAGE_LIMIT:-20}
     depends_on:
       postgres:
         condition: service_healthy
@@ -59,14 +52,12 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-      args:
-        INSTALL_PROVIDERS: "1"
     command:
       [
         "python",
         "-m",
         "uvicorn",
-        "finance_agent.main:app",
+        "app.main:app",
         "--host",
         "0.0.0.0",
         "--port",
@@ -76,13 +67,9 @@ services:
       - .env
     environment:
       <<: *app-environment
-    volumes:
-      - ./.cache/models:/app/.cache/models
     depends_on:
       migrate:
         condition: service_completed_successfully
-      redis:
-        condition: service_healthy
     healthcheck:
       test:
         [
@@ -94,33 +81,7 @@ services:
       interval: 10s
       timeout: 8s
       retries: 12
-      start_period: 60s
-    restart: unless-stopped
-
-  celery:
-    image: finance-agent-api:local
-    command:
-      [
-        "celery",
-        "-A",
-        "finance_agent.infrastructure.jobs.celery_app:celery_app",
-        "worker",
-        "-Q",
-        "finance.quant",
-        "-l",
-        "info",
-      ]
-    env_file:
-      - .env
-    environment:
-      <<: *app-environment
-    volumes:
-      - ./.cache/models:/app/.cache/models
-    depends_on:
-      migrate:
-        condition: service_completed_successfully
-      redis:
-        condition: service_healthy
+      start_period: 30s
     restart: unless-stopped
 
   web:

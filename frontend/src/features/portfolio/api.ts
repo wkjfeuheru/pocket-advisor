@@ -1,4 +1,4 @@
-/** 模拟交易 API 封装：商品货架、账户、持仓、下单、清仓、记录。 */
+/** 模拟交易 API 封装：账户、持仓、下单、清仓、记录。 */
 
 import { http } from '@/api/client'
 import type {
@@ -9,29 +9,11 @@ import type {
   OrderListResponse,
   OrderRequest,
   PositionListResponse,
-  ProductShelfResponse,
-  ProductView,
   TradeResponse,
   TransactionListResponse,
 } from '@/features/portfolio/types'
 
 const PORTFOLIO_BASE = '/portfolio'
-
-/** 商品货架 */
-export async function listProducts(productType = 'fund'): Promise<ProductShelfResponse> {
-  const { data } = await http.get<ProductShelfResponse>(`${PORTFOLIO_BASE}/products`, {
-    params: { product_type: productType },
-  })
-  return data
-}
-
-/** 单品详情 */
-export async function getProduct(code: string): Promise<ProductView> {
-  const { data } = await http.get<ProductView>(
-    `${PORTFOLIO_BASE}/products/${encodeURIComponent(code)}`,
-  )
-  return data
-}
 
 /** 账户数据面板 */
 export async function getAccount(): Promise<AccountSnapshot> {
@@ -80,8 +62,6 @@ export async function listTransactions(limit = 100): Promise<TransactionListResp
 }
 
 export default {
-  listProducts,
-  getProduct,
   getAccount,
   listPositions,
   deposit,

@@ -4,7 +4,6 @@ import { useRoute, useRouter } from 'vue-router'
 import { SwitchButton } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import LoginView from '@/features/auth/components/LoginView.vue'
-import ChatView from '@/features/chat/views/ChatView.vue'
 import { getCurrentUser, logout } from '@/features/auth/api'
 import { getStoredUser, saveUser, clearUser } from '@/app/session'
 import type { UserInfo } from '@/features/auth/types'
@@ -13,7 +12,6 @@ const route = useRoute()
 const router = useRouter()
 
 const currentUser = ref<UserInfo | null>(null)
-const chatViewRef = ref<InstanceType<typeof ChatView> | null>(null)
 
 const displayName = computed(() => currentUser.value?.display_name || currentUser.value?.username || '')
 const isLoggedIn = computed(() => !!currentUser.value)
@@ -21,10 +19,10 @@ const isAdmin = computed(() => currentUser.value?.is_admin === true)
 
 /** 顶部导航项；交易入口均在登录后可见。 */
 const navItems = [
-  { name: 'chat', label: '投顾对话' },
   { name: 'market', label: '商品' },
   { name: 'positions', label: '持仓' },
   { name: 'account', label: '账户' },
+  { name: 'advisor', label: '投顾' },
 ]
 
 /** 后台分区导航：每个面板一个页面，不堆在同一页。 */
@@ -66,7 +64,7 @@ async function syncRouteWithRole() {
   if (isAdmin.value && !route.meta.adminOnly) {
     await router.replace({ name: 'admin-users' })
   } else if (!isAdmin.value && route.meta.adminOnly) {
-    await router.replace({ name: 'chat' })
+    await router.replace({ name: 'market' })
   }
 }
 
@@ -74,7 +72,6 @@ async function syncRouteWithRole() {
 async function handleLoggedIn(user: UserInfo) {
   currentUser.value = user
   await refreshIdentity()
-  if (!isAdmin.value) await chatViewRef.value?.initialize()
 }
 
 /** 登出 */
@@ -94,7 +91,7 @@ async function handleLogout() {
   }
   await logout()
   currentUser.value = null
-  await router.replace({ name: 'chat' })
+  await router.replace({ name: 'market' })
   ElMessage.success('已登出')
 }
 
@@ -215,13 +212,11 @@ onUnmounted(() => {
       </div>
     </header>
 
-    <!-- 必须有一层 flex 占位：否则 RouterView/keep-alive 不参与 flex，
+    <!-- 必须有一层 flex 占位：否则 RouterView 不参与 flex，
          商品/持仓页的 min-height:0 会把表格高度算成 0，看起来像没有数据。 -->
     <div class="app-page">
       <router-view v-slot="{ Component }">
-        <keep-alive :include="['ChatView']">
-          <component :is="Component" :current-user="currentUser" ref="chatViewRef" />
-        </keep-alive>
+        <component :is="Component" :current-user="currentUser" />
       </router-view>
     </div>
   </div>

@@ -1,15 +1,7 @@
 """全包静态守卫：模块里不得出现"未定义的全局名"。
 
-历史上同一类缺陷出现过两次，而且都是**静默**降级，用户只看得到"像没上下文"：
-
-- ``orchestration/routing/task_rewrite.py`` 用了 ``json`` 却没 import：任务改写器
-  每次调用都抛 ``NameError``，被 ``except Exception`` 吞掉 → 指代性追问永远拿不到
-  补全后的自包含任务描述；
-- ``orchestration/memory.py`` 用了 ``logger`` 却没定义：画像读取失败时抛
-  ``NameError`` 而不是回退空画像，整轮直接失败。
-
 这类错误只在特定分支（异常路径、首次调用）才炸，靠人工 review 极易漏。这里用 AST
-做一次静态扫描，把它变成常驻测试。
+做一次静态扫描，把它变成常驻测试。覆盖 ``app`` 包（含入口 ``app/main.py``）与 ``scripts``。
 """
 
 from __future__ import annotations
@@ -19,7 +11,23 @@ import builtins
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-PACKAGE = ROOT / "finance_agent"
+#: 顶层 Python 包（与 pyproject 的 packages.find 一致）。
+PACKAGES = ("app", "scripts")
+#: 根目录单文件模块。入口已收进 ``app/main.py``，由包扫描覆盖。
+MODULES: tuple[str, ...] = ()
+
+
+def _targets() -> list[Path]:
+    paths: list[Path] = []
+    for package in PACKAGES:
+        directory = ROOT / package
+        if directory.is_dir():
+            paths.extend(directory.rglob("*.py"))
+    for module in MODULES:
+        candidate = ROOT / module
+        if candidate.is_file():
+            paths.append(candidate)
+    return sorted(paths)
 
 #: 由运行环境注入的名字（静态扫描看不到赋值处）。
 _RUNTIME_NAMES = {"__file__", "__name__", "__doc__", "__package__", "__spec__"}
@@ -73,7 +81,7 @@ def _unresolved_names(path: Path) -> list[str]:
 def test_no_module_reads_an_undefined_global() -> None:
     offenders = [
         f"{path.relative_to(ROOT)} 读取了未定义的全局名: {', '.join(names)}"
-        for path in sorted(PACKAGE.rglob("*.py"))
+        for path in _targets()
         for names in (_unresolved_names(path),)
         if names
     ]

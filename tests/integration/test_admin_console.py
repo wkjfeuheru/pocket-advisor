@@ -12,18 +12,13 @@ from contextlib import contextmanager
 import pytest
 from fastapi import HTTPException
 
-from finance_agent.application.admin_service import AdminService
-from finance_agent.api import dependencies as r
-from finance_agent.api.dependencies import _is_admin
-from finance_agent.api.routers import admin as admin_routes
-from finance_agent.domains.portfolio.errors import (
-    InvalidAmountError,
-    NoPositionError,
-    ProductNotFoundError,
-    ProductOfflineError,
-)
-from finance_agent.domains.portfolio.pricing import NavQuote
-from finance_agent.domains.portfolio.service import PortfolioDeps, PortfolioService
+from app.services.admin_service import AdminService
+from app.routers import admin as admin_routes
+from app.services.portfolio_service import PortfolioDeps, PortfolioError, PortfolioService
+from app.services.product_service import NavQuote, ProductDeps, ProductError, ProductLibraryNavSource, ProductService
+from app.core import dependencies as r
+from app.core.dependencies import _is_admin
+from app.utils.errors import BusinessError
 
 
 # ── 假存储与假库 ──────────────────────────────────────────────────
@@ -102,10 +97,12 @@ class _FakeLibrary:
         return [item for item in (self._shape(c) for c in codes) if item]
 
     def list_products(self, product_type="fund", include_inactive=False):
+        kind = (product_type or "fund").strip()
         return [
             {"code": code, "name": data["name"]}
             for code, data in self._products.items()
-            if include_inactive or data.get("is_active", True)
+            if (include_inactive or data.get("is_active", True))
+            and (kind.lower() == "all" or data.get("type", "fund") == kind)
         ]
 
     def set_product_active(self, code, active):
@@ -147,31 +144,11 @@ class _FakeNavSource:
         return NavQuote(product_code=str(product_code), nav=nav, as_of="2026-09-08") if nav else None
 
 
-class _FakeCursor:
-    """占位游标：假存储在事务里只需要一个可传入的对象。"""
-
-    def execute(self, *args, **kwargs):
-        return None
-
-    def fetchone(self):
-        return None
-
-    def close(self):
-        pass
-
-
-class _FakeConnection:
-    """假连接：``cursor()`` 返回占位游标，与真实存储的事务形态一致。"""
-
-    def cursor(self):
-        return _FakeCursor()
-
-
 class _FakePortfolioStore:
     """最小账户/持仓存储：有资金、无持仓。
 
     申购在走到商品校验前会先 ``ensure_account``，因此这里必须有账户行；
-    持仓为空则让赎回止步于 ``NoPositionError``，正好用来验证"下架不挡赎回"。
+    持仓为空则让赎回止步于 ``PortfolioError(code=no_position)``，正好用来验证"下架不挡赎回"。
     """
 
     def ensure_account(self, customer_id):
@@ -186,12 +163,12 @@ class _FakePortfolioStore:
 
     @contextmanager
     def transaction(self):
-        yield _FakeConnection()
+        yield self
 
-    def lock_account(self, cursor, customer_id):
+    def lock_account(self, session, customer_id):
         return self.ensure_account(customer_id)
 
-    def get_position_row(self, cursor, customer_id, product_code):
+    def get_position_row(self, session, customer_id, product_code):
         return None
 
 
@@ -209,19 +186,28 @@ def _portfolio(library=None):
     ))
 
 
-def _portfolio_on_library(library):
-    """用真实 ``ProductLibraryNavSource`` 的装配：净值从产品库读。
-
-    "管理端写入净值 → 货架可展示、可申购"这条链路只有在取价也走产品库时才成
-    立，因此这组测试不能用固定净值的 ``_FakeNavSource``。
-    """
-    from finance_agent.application.portfolio_service import ProductLibraryNavSource
-
-    return PortfolioService(PortfolioDeps(
-        store=_FakePortfolioStore(),
-        library=library,
-        nav_source=ProductLibraryNavSource(library),
+def _products(library=None, nav_source=None):
+    lib = library or _FakeLibrary(PRODUCTS)
+    return ProductService(ProductDeps(
+        library=lib,
+        nav_source=nav_source or _FakeNavSource({"110011": 3.85, "003003": 1.0}),
     ))
+
+
+def _admin(library=None, *, on_library=False):
+    lib = library or _FakeLibrary(PRODUCTS)
+    nav = ProductLibraryNavSource(lib) if on_library else _FakeNavSource(
+        {"110011": 3.85, "003003": 1.0},
+    )
+    return AdminService(
+        auth_store=_FakeAuthStore(),
+        portfolio=_portfolio(lib) if not on_library else PortfolioService(PortfolioDeps(
+            store=_FakePortfolioStore(),
+            library=lib,
+            nav_source=nav,
+        )),
+        products=_products(lib, nav),
+    )
 
 
 # ── 角色解析 ──────────────────────────────────────────────────────
@@ -229,7 +215,7 @@ def _portfolio_on_library(library):
 @pytest.fixture()
 def roles(monkeypatch):
     """装一个库内有角色的 store，并清空白名单。"""
-    from finance_agent.api import dependencies as deps
+    from app.core import dependencies as deps
 
     store = _FakeAuthStore()
     monkeypatch.setattr(r, "get_user_store", lambda: store)
@@ -248,7 +234,7 @@ def test_db_role_grants_admin_without_whitelist(roles):
 
 def test_whitelist_still_grants_admin(monkeypatch):
     """白名单与库内角色取并集：改配置即可授权的既有运维方式继续可用。"""
-    from finance_agent.api import dependencies as deps
+    from app.core import dependencies as deps
 
     monkeypatch.setattr(r, "get_user_store", lambda: _FakeAuthStore())
     monkeypatch.setattr(r, "ADMIN_CUSTOMER_IDS", {"CUST000001"})
@@ -259,8 +245,8 @@ def test_whitelist_still_grants_admin(monkeypatch):
 
 
 def test_role_lookup_failure_fails_closed(monkeypatch):
-    """角色查询异常时必须按"非管理员"处理，不能让库故障变成提权。"""
-    from finance_agent.api import dependencies as deps
+    """角色查询异常时必须拒绝分类，不能把管理员降级成普通用户。"""
+    from app.core import dependencies as deps
 
     class _Broken:
         def is_admin(self, customer_id):
@@ -271,7 +257,8 @@ def test_role_lookup_failure_fails_closed(monkeypatch):
     monkeypatch.setattr(deps, "get_user_store", lambda: _Broken())
     monkeypatch.setattr(deps, "ADMIN_CUSTOMER_IDS", set())
 
-    assert _is_admin("CUST000002") is False
+    with pytest.raises(RuntimeError, match="db down"):
+        _is_admin("CUST000002")
 
 
 def test_demoted_user_loses_admin(roles):
@@ -285,14 +272,14 @@ def test_demoted_user_loses_admin(roles):
 
 def test_non_admin_cannot_list_users(monkeypatch):
     """普通用户调用管理接口被 403 拦下。"""
-    from finance_agent.api import dependencies as deps
+    from app.core import dependencies as deps
 
     monkeypatch.setattr(r, "get_user_store", lambda: _FakeAuthStore())
     monkeypatch.setattr(r, "ADMIN_CUSTOMER_IDS", set())
-    monkeypatch.setattr(r, "_require_customer_id", lambda request: "CUST000001")
+    monkeypatch.setattr(r, "resolve_customer_id", lambda request: "CUST000001")
     monkeypatch.setattr(deps, "get_user_store", lambda: _FakeAuthStore())
     monkeypatch.setattr(deps, "ADMIN_CUSTOMER_IDS", set())
-    monkeypatch.setattr(deps, "_require_customer_id", lambda request: "CUST000001")
+    monkeypatch.setattr(deps, "resolve_customer_id", lambda request: "CUST000001")
 
     with pytest.raises(HTTPException) as exc:
         admin_routes.list_users(_Request())
@@ -301,13 +288,13 @@ def test_non_admin_cannot_list_users(monkeypatch):
 
 def test_admin_can_list_users_through_route(monkeypatch):
     """管理员经路由拿到用户总览。"""
-    from finance_agent.api import dependencies as deps
+    from app.core import dependencies as deps
 
     store = _FakeAuthStore()
     monkeypatch.setattr(r, "get_user_store", lambda: store)
-    monkeypatch.setattr(r, "_require_customer_id", lambda request: "CUST000002")
+    monkeypatch.setattr(r, "resolve_customer_id", lambda request: "CUST000002")
     monkeypatch.setattr(deps, "get_user_store", lambda: store)
-    monkeypatch.setattr(deps, "_require_customer_id", lambda request: "CUST000002")
+    monkeypatch.setattr(deps, "resolve_customer_id", lambda request: "CUST000002")
     monkeypatch.setattr(admin_routes, "get_admin_service",
                         lambda: AdminService(auth_store=store, portfolio=_portfolio()))
 
@@ -346,11 +333,11 @@ def test_user_portfolio_reports_missing_user():
 
 def test_offline_removes_product_from_user_shelf_but_keeps_admin_view():
     library = _FakeLibrary(PRODUCTS)
-    service = AdminService(auth_store=_FakeAuthStore(), portfolio=_portfolio(library))
+    service = _admin(library)
 
     service.set_product_active("110011", False)
 
-    user_codes = [item.code for item in service.portfolio.list_products()]
+    user_codes = [item.code for item in service.products.list_products()]
     admin_codes = [item.code for item in service.list_products()]
     assert "110011" not in user_codes
     assert "110011" in admin_codes
@@ -362,17 +349,19 @@ def test_offline_blocks_buy_but_allows_sell():
     library.set_product_active("110011", False)
     service = _portfolio(library)
 
-    with pytest.raises(ProductOfflineError):
+    with pytest.raises(PortfolioError) as exc:
         service.buy("CUST000001", "110011", amount=1000.0)
+    assert exc.value.code == "product_offline"
 
     # 赎回走的是商品存在性 + 持仓校验，不应再撞上下架拦截。
-    with pytest.raises(NoPositionError):
+    with pytest.raises(PortfolioError) as exc:
         service.sell("CUST000001", "110011", shares=10.0)
+    assert exc.value.code == "no_position"
 
 
 def test_reactivating_restores_tradability():
     library = _FakeLibrary(PRODUCTS)
-    service = AdminService(auth_store=_FakeAuthStore(), portfolio=_portfolio(library))
+    service = _admin(library)
 
     service.set_product_active("110011", False)
     product = service.set_product_active("110011", True)
@@ -383,16 +372,17 @@ def test_reactivating_restores_tradability():
 
 
 def test_offline_unknown_product_raises_not_found():
-    service = AdminService(auth_store=_FakeAuthStore(), portfolio=_portfolio())
+    service = _admin()
 
-    with pytest.raises(ProductNotFoundError):
+    with pytest.raises(ProductError) as exc:
         service.set_product_active("000000", False)
+    assert exc.value.code == "product_not_found"
 
 
 def test_active_product_view_exposes_is_active():
-    service = _portfolio()
+    products = _products()
 
-    shelf = {item.code: item for item in service.list_products()}
+    shelf = {item.code: item for item in products.list_products()}
     assert shelf["110011"].is_active is True
     assert shelf["110011"].tradable is True
 
@@ -402,7 +392,7 @@ def test_active_product_view_exposes_is_active():
 def test_new_product_without_performance_is_not_tradable():
     """只填商品静态字段的新品：没有净值，照常上架但不可申购。"""
     library = _FakeLibrary({})
-    service = AdminService(auth_store=_FakeAuthStore(), portfolio=_portfolio_on_library(library))
+    service = _admin(library, on_library=True)
 
     product = service.upsert_product({"code": "012345", "name": "科技创新混合C", "risk_level": "R4 中高风险"})
 
@@ -420,7 +410,7 @@ def test_issue_product_with_nav_makes_it_displayable_and_tradable():
     取价链路才能读到，否则新发的商品永远显示"—"且买不了。
     """
     library = _FakeLibrary({})
-    service = AdminService(auth_store=_FakeAuthStore(), portfolio=_portfolio_on_library(library))
+    service = _admin(library, on_library=True)
 
     product = service.upsert_product({
         "code": "012345", "name": "科技创新混合C", "risk_level": "R4 中高风险",
@@ -435,19 +425,19 @@ def test_issue_product_with_nav_makes_it_displayable_and_tradable():
     assert product.tradable is True
 
     # 用户侧货架同样可见，不只是管理端回读。
-    shelf = {item.code: item for item in service.portfolio.list_products()}
+    shelf = {item.code: item for item in service.products.list_products()}
     assert shelf["012345"].nav.value == pytest.approx(1.2345)
 
 
 def test_editing_product_without_performance_does_not_write_empty_nav():
     """编辑商品名时不传业绩字段：不得写进一条空净值把商品"假装"标成有数据。"""
     library = _FakeLibrary({})
-    service = AdminService(auth_store=_FakeAuthStore(), portfolio=_portfolio_on_library(library))
+    service = _admin(library, on_library=True)
 
     service.upsert_product({"code": "012345", "name": "科技创新混合C", "nav": 1.2})
     service.upsert_product({"code": "012345", "name": "科技创新混合C（改名）"})
 
-    product = service.portfolio.get_product("012345")
+    product = service.products.get_product("012345")
     assert product.name == "科技创新混合C（改名）"
     # 上一次写入的净值保留（业绩表按追加行取最新一条），没有被空值覆盖。
     assert product.nav.value == pytest.approx(1.2)
@@ -461,7 +451,7 @@ def test_editing_only_return_keeps_existing_nav():
     申购的商品会静默变成"缺净值"。
     """
     library = _FakeLibrary({})
-    service = AdminService(auth_store=_FakeAuthStore(), portfolio=_portfolio_on_library(library))
+    service = _admin(library, on_library=True)
 
     service.upsert_product({"code": "012345", "name": "科技创新混合C", "nav": 1.2, "nav_date": "2026-09-01"})
     product = service.upsert_product({"code": "012345", "name": "科技创新混合C", "return_1y": 0.2})
@@ -474,9 +464,9 @@ def test_editing_only_return_keeps_existing_nav():
 def test_non_positive_nav_is_rejected():
     """非正净值存进去会被取价逻辑判为不可用，因此必须当场拒绝而非静默落库。"""
     library = _FakeLibrary({})
-    service = AdminService(auth_store=_FakeAuthStore(), portfolio=_portfolio_on_library(library))
+    service = _admin(library, on_library=True)
 
-    with pytest.raises(InvalidAmountError):
+    with pytest.raises(BusinessError, match="最新净值必须大于 0"):
         service.upsert_product({"code": "012345", "name": "科技创新混合C", "nav": 0.0})
 
 
@@ -484,7 +474,7 @@ def test_upsert_request_rejects_non_positive_nav_at_schema_level():
     """净值必须为正：在请求模型这一层就挡住，不依赖业务层兜底。"""
     from pydantic import ValidationError
 
-    from finance_agent.api.schemas.admin import AdminProductUpsertRequest
+    from app.schemas.admin import AdminProductUpsertRequest
 
     with pytest.raises(ValidationError):
         AdminProductUpsertRequest(code="012345", name="科技创新混合C", nav=-1.0)

@@ -1,7 +1,7 @@
 """模拟交易 REST 接口测试：鉴权、越权隔离、清仓与账户口径。
 
-服务层用内存假实现注入（``api.portfolio_routes.get_service``），因此不需要
-PostgreSQL；鉴权仍走真实 token 校验路径（``get_user_store`` 被替换）。
+服务层用内存假实现注入（``portfolio.router.get_service`` / ``product.router.get_service``），
+因此不需要 PostgreSQL；鉴权仍走真实 token 校验路径（``get_user_store`` 被替换）。
 """
 
 from __future__ import annotations
@@ -13,8 +13,8 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from finance_agent.domains.portfolio.pricing import NavQuote
-from finance_agent.domains.portfolio.service import PortfolioDeps, PortfolioService
+from app.services.portfolio_service import PortfolioDeps, PortfolioService
+from app.services.product_service import ProductDeps, ProductService
 
 from tests.integration.test_portfolio_service import (  # noqa: E402 - 复用服务层的内存假件
     PRODUCTS,
@@ -23,33 +23,48 @@ from tests.integration.test_portfolio_service import (  # noqa: E402 - 复用服
     _FakeStore,
 )
 
-TOKEN_BY_CUSTOMER = {"TOKEN-A": "CUST000001", "TOKEN-B": "CUST000002"}
+TOKEN_BY_CUSTOMER = {
+    "TOKEN-A": "CUST000001",
+    "TOKEN-B": "CUST000002",
+    "TOKEN-ADMIN": "CUSTADMIN",
+}
 
 
 class _FakeUserStore:
-    """只实现 token 校验；路由不触碰其它认证能力。"""
+    """只实现 token 校验与角色；路由不触碰其它认证能力。"""
 
     def verify_token(self, token: str):
         return TOKEN_BY_CUSTOMER.get(token)
 
+    def is_admin(self, customer_id):
+        return str(customer_id).upper() == "CUSTADMIN"
+
 
 @pytest.fixture()
 def client(monkeypatch):
-    from finance_agent.api.routers import portfolio as portfolio_routes
+    from app.routers import admin as admin_routes
+    from app.routers import portfolio as portfolio_routes
+    from app.routers import product as product_routes
 
     store = _FakeStore()
+    library = _FakeLibrary(PRODUCTS)
+    nav_source = _FakeNavSource({"110011": 3.85, "003003": 1.0})
     service = PortfolioService(PortfolioDeps(
         store=store,
-        library=_FakeLibrary(PRODUCTS),
-        nav_source=_FakeNavSource({"110011": 3.85, "003003": 1.0}),
+        library=library,
+        nav_source=nav_source,
     ))
+    products = ProductService(ProductDeps(library=library, nav_source=nav_source))
     monkeypatch.setattr(portfolio_routes, "get_service", lambda: service)
+    monkeypatch.setattr(product_routes, "get_service", lambda: products)
     monkeypatch.setattr(
-        "finance_agent.api.dependencies.get_user_store", lambda: _FakeUserStore(),
+        "app.core.dependencies.get_user_store", lambda: _FakeUserStore(),
     )
 
     app = FastAPI()
+    app.include_router(product_routes.router)
     app.include_router(portfolio_routes.router)
+    app.include_router(admin_routes.router)
     client = TestClient(app)
     client.service = service
     client.store = store
@@ -292,3 +307,19 @@ def test_buy_with_undisclosed_fee_surfaces_limitations(client, monkeypatch):
     }, headers=auth())
     assert response.status_code == 200
     assert "fee_unavailable:subscription_fee" in response.json()["order"]["fee_limitations"]
+
+
+# ── 角色互斥 ──────────────────────────────────────────────────────
+
+def test_admin_token_cannot_call_user_portfolio_api(client):
+    """管理员 token 不得调用用户交易接口。"""
+    response = client.get("/api/portfolio/account", headers=auth("TOKEN-ADMIN"))
+    assert response.status_code == 403
+    assert "管理员" in response.json()["detail"]
+
+
+def test_user_token_cannot_call_admin_api(client):
+    """普通用户 token 不得调用管理接口。"""
+    response = client.get("/api/admin/users", headers=auth())
+    assert response.status_code == 403
+    assert "管理员" in response.json()["detail"]

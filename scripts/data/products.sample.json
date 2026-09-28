@@ -1,0 +1,23 @@
+{
+  "products": [
+    {
+      "code": "510300",
+      "name": "华泰柏瑞沪深300ETF",
+      "type": "etf",
+      "establish_date": "2012-05-04",
+      "scale": 1200.0,
+      "manager": "示例经理",
+      "company": "华泰柏瑞基金",
+      "management_fee": 0.5,
+      "custody_fee": 0.1,
+      "subscription_fee": 0.0,
+      "redemption_fee": "0",
+      "risk_level": "R4 中高风险",
+      "recommended_holding_period": "long",
+      "investment_target": "紧密跟踪沪深300指数，追求跟踪偏离度和跟踪误差最小化。",
+      "investment_strategy": "完全复制法被动跟踪标的指数。"
+    }
+  ],
+  "holdings": [],
+  "performance": []
+}

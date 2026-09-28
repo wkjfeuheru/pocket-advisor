@@ -1,809 +1,254 @@
 # Finance Agent
 
-基于 LangGraph 多 Agent 协作的智能投顾助手。系统通过自然语言收集用户投资需求，完成用户画像提取、股票识别、行情与财务数据获取、基本面分析、技术分析和合规审查，并提供 Vue 3 Web 界面及 FastAPI 接口。
+金融投顾**业务系统**：模拟交易（商品、持仓、账户）与只读智能投顾对话，配 Vue 3 界面与 FastAPI 接口。**模拟盘，不对接券商，不构成投资建议。**
+
+普通用户可以在 `/advisor` 与投顾助手对话。助手只读取商品、账户和持仓，不能充值、下单、赎回或清仓。管理员仍只使用管理后台，不能进入投顾。
 
 ## 功能特性
 
-- 多 Agent 工作流：由 Supervisor 规划并协调各专业 Agent。
-- A 股数据：默认按 `DATA_PROVIDER_ORDER` 在 AKShare / Tushare MCP / BaoStock 之间按方法降级，获取股票信息、最近交易日行情、历史 K 线和财务指标。
-- 可选数据源：配置 `TUSHARE_MCP_URL` 后启用 Tushare MCP 作为其中一路（需 ≥2000 积分才能提供股息率）。
-- 主题/板块筛选：按主题或行业找标的时，先在东方财富的概念/行业板块表里定位板块（"AI"→"人工智能"），再取板块成分，按**确定性规则评分**（与个股研究同一套规则/评分/行动结论）排序给出候选清单；清单明示预筛口径（成交额靠前的有限只数）与免责说明，不按涨跌幅排序、不构成推荐。板块取数走自建直连客户端（字段码显式映射 + 主机轮换 + 有界预算），并区分两种失败：**关键词没匹配到**（提示换更具体的板块名）与**板块数据源取数失败**（如实说明数据源暂不可用，不把故障说成没匹配到）。
-- 基本面与技术面分析：支持财务指标及 MACD、KDJ、RSI、BOLL、MA、WR 等指标。
-- 合规审查：对最终回答执行敏感内容和投资风险检查。输入侧区分“问规则”与“求操作”：合规的知识咨询（如“什么是操纵市场？”）放行并走 FAQ，求助执行类请求（如“帮我操纵股价”）拦截；无法判定时默认拦截。引用 FAQ 原文的回答只审计不改写，避免删改风险词汇导致语句失真。
-- 流式对话：支持基于 SSE 的实时响应。
-- 用户系统：支持注册、登录、Bearer Token 认证、会话管理和账户注销。
-- 模拟交易：商品货架（基金产品按最新净值展示，含风险等级与费率）、按金额/份额申购、持仓按最新净值估值、部分或全部赎回、一键清仓、账户数据面板（总资产/可用资金/持仓市值/累计与已实现盈亏）与虚拟资金充值。单一服务层同时支撑 REST 接口与对话问答，因此两个入口的口径必然一致。**模拟盘，不对接券商，不构成投资建议。**
-- 多层记忆：Redis 保存运行时记忆，PostgreSQL 保存认证、业务数据和 LangGraph checkpoint。
-- 强制登录：匿名访问已关闭。聊天、画像、历史记录、会话管理、账户操作和模拟交易都必须使用有效登录令牌。
+- **用户系统**：注册、登录、Bearer Token 认证、会话管理与账户注销（PBKDF2-SHA256 + 随机盐）。
+- **商品货架**：基金产品按最新净值展示，含风险等级、费率、建议持有期与上下架状态；取不到净值的商品照常展示但标记不可交易。
+- **模拟交易**：按金额/份额申购、持仓按最新净值估值、部分或全部赎回、一键清仓、虚拟资金充值（幂等键防重复入账）。
+- **账户面板**：总资产、可用资金、持仓市值、累计与已实现盈亏；任一持仓缺净值时登记 `pricing_issues`，不把市值静默算小。
+- **管理后台**：全站用户与持仓总览、商品发行/编辑与软上下架（下架商品不可申购但既有持仓仍可赎回）。
+- **单一计算源**：账户与盈亏口径只有一份实现（`app/services/portfolio_service.py`），REST 与管理后台只读该口径。
+- **角色互斥**：普通用户走 `/api/portfolio/*`、交易界面和 `/advisor`；管理员走 `/api/admin/*` 与后台。登录共用，登录后立刻分流。管理员 token 调用用户交易或投顾接口返回 403。
+- **只读投顾**：LangGraph 工作流做意图识别，再并行股票子图 / 商品 / 持仓 / 问答。股票子图覆盖市场总览、1–3 只个股深研和研究候选池。行情或快照局部故障时按场景降级，不编造数字。
 
-## 工作流程
+## 投顾工作流
 
 ```text
-用户请求
-   |
-   v
-用户认证
-   |
-   v
-Supervisor Graph（领域分类与路由）
-   |
-   +--> 业务领域（单领域或多领域并行扇出，同一路径）
-   |      Stock Research（基本面 + 技术面）
-   |      Product Research（产品解读与适配度）
-   |      Account Portfolio（自有账户与持仓，只读）
-   +--> 无业务领域：Conversation（FAQ 检索 + 受约束叙述）
-   |
-   v
-Compliance（统一合规出口）
-   |
-   v
-最终回答
+START → classify_intent → profile_gate → dispatch_intents
+      → stock / product / portfolio / chat（只派发命中的分支）
+      → suitability_guard → aggregator → output_guard → END
 ```
 
-Supervisor Graph 会按意图选择领域，并非每次请求都执行完整流程。**账户领域是只读的**：它只调用
-账户与持仓查询，命中"买入/卖出/清仓/充值"时返回固定引导文案，不做任何资金操作——交易必须
-在「商品」「持仓」「账户」页面由用户显式完成。多标的请求（选股推荐、
-股票比较）会按标的并行取数并逐只给出独立结论。**主题/板块类请求**（如"帮我推荐几个AI行业
-值得关注的股票"）走"板块定位 → 成分取数 → 确定性评分排序"：只对成交额靠前的有限只数
-（默认 10）做规则评估、返回前 5 只候选，回答里必须带预筛口径与免责说明；**关键词没匹配到**与
-**板块数据源取数失败**会被严格区分——前者提示换更具体的板块名，后者如实说明数据源暂不可用
-（不说成"没匹配到"、不反复换词），两种情况下都不会凭记忆列股票。
+- 个性化建议缺少风险、期限、目标或流动性时，原轮次会挂起。用户在表单里确认后，用原来的 `request_id` 恢复，不必重发问题。涉及金额配置时还要预算。模型不能改写长期画像。
+- 股票标的歧义、一次深研超过 3 只、或选股缺少策略/周期时，走独立的澄清中断（`clarification_required`），与画像中断分开。
+- 高于用户风险等级的商品可以解释，但不会进入推荐集合。研究候选股票走 `candidate_stocks`，不会进入商品适配性门禁。
+- 会话 id 就是 LangGraph `thread_id`。图在每个节点边界以同步耐久模式写入 PgSaver。重复 `request_id` 不会再保存用户消息，也不会重跑已完成轮次。失败且 `retryable` 的轮次从最近 checkpoint 重试。
+- PgSaver 自己的 `checkpoint_*` 表是基础设施，不在业务 ORM 和业务查询里。删除会话时会调用 `adelete_thread` 清掉对应 checkpoint。
+- 启动时会把超时仍处于 `pending` / `running` 的轮次标成可重试。画像确认中的轮次不会被超时扫掉。
+- 模型或 PgSaver 不可用时，投顾接口返回 503，商品、账户、交易和管理接口照常可用。
 
 ## 技术栈
 
-### 后端
-
 - Python 3.10+
 - FastAPI / Uvicorn
-- LangChain / LangGraph
-- DeepSeek
-- Tushare MCP
-- Redis
-- PostgreSQL
-- Celery
-- pandas / NumPy
-
-### 前端
-
-- Vue 3
-- TypeScript
-- Vite
-- Vue Router
-- Element Plus
-- Axios
+- SQLAlchemy 2.x（ORM） + psycopg3
+- PostgreSQL，以及 LangGraph `AsyncPostgresSaver`
+- LangGraph / LangChain / OpenAI-compatible Chat Model
+- Pydantic v2
+- Vue 3 / TypeScript / Vite / Element Plus / Axios
 
 ## 项目结构
 
 ```text
 FinanceAgent/
-├── finance_agent/
-│   ├── api/                 # FastAPI 应用、路由和请求/响应模型
-│   ├── application/         # Advisor 用例、回合协调、持久化与恢复
-│   ├── cli/                 # 管理员、FAQ、诊断和研究回放命令
-│   ├── domains/             # FAQ、组合、产品与股票研究领域
-│   ├── infrastructure/     # PostgreSQL、Redis、LLM、行情与后台任务
-│   ├── orchestration/       # 专家、路由、工作流、记忆与运行时
-│   ├── safety/              # 输入与输出安全策略
-│   ├── shared/              # 跨层契约、序列化和标识符
-│   ├── bootstrap.py         # 应用依赖装配
-│   └── main.py              # 公开 ASGI 入口
-├── frontend/src/            # Vue 应用、共享 API client 与 feature slices
-├── migrations/              # PostgreSQL 编号迁移（001–014）
-├── evals/                   # 评测场景、运行器与基线
-├── tests/                   # architecture / unit / integration / contract / e2e
-├── scripts/                 # 本地启动与评测封装脚本
-├── docs/                    # 架构、FAQ、参考和运维文档
-├── deploy/                  # Docker/Nginx 部署资产
+├── app/
+│   ├── main.py                 # FastAPI 入口、路由注册、lifespan 初始化 Agent
+│   ├── core/                   # 配置、密码与令牌、鉴权依赖、日志
+│   ├── db/                     # Base、session、schema 加载、ORM 模型
+│   ├── schemas/                # API 请求/响应
+│   ├── crud/                   # 数据访问
+│   ├── services/               # 业务逻辑（含盈亏口径）
+│   ├── routers/                # HTTP 路由（user / product / portfolio / admin / agent）
+│   ├── agents/                 # 投顾 LangGraph、只读工具与运行时
+│   ├── mcp/                    # Fuyao 白名单客户端、Tushare、MCP 连接
+│   └── utils/                  # 错误映射、限流、文本工具
+├── scripts/       # 运维/诊断脚本（migrate / bootstrap_admin / 种子 / 漂移诊断）
+├── migrations/    # PostgreSQL 编号迁移 SQL（结构唯一事实源）
+├── frontend/src/  # Vue 应用（product / portfolio / admin / auth features）
+├── tests/         # architecture / unit / integration / contract，以及 Agent 骨架测试
+├── deploy/        # Nginx 部署资产
 ├── docker-compose.yml
 ├── Dockerfile
 ├── Dockerfile.web
 ├── pyproject.toml
-├── requirements.txt
-└── requirements.lock
+└── requirements.txt
 ```
-
-## 环境要求
-
-- Python 3.10 或更高版本
-- Node.js 18 或更高版本
-- Redis 服务
-- 有效的 DeepSeek API Key
-- PostgreSQL（认证、业务、checkpoint；预发镜像使用带 pgvector 的 Postgres 16）
-- 生产/预发另需 Docker Compose
 
 ## 快速开始
 
-### 1. 创建虚拟环境
+### 本地运行
 
 ```bash
-git clone <repository-url>
-cd FinanceAgent
-python -m venv .venv
-```
-
-Windows PowerShell：
-
-```powershell
-.\.venv\Scripts\Activate.ps1
-```
-
-Linux / macOS：
-
-```bash
-source .venv/bin/activate
-```
-
-### 2. 安装后端依赖
-
-推荐以可编辑模式安装：
-
-```bash
-pip install -e .
-```
-
-如果不使用可编辑安装，也可以直接安装依赖文件：
-
-```bash
-pip install -r requirements.txt
-```
-
-Docker 镜像按 `requirements.lock` 安装，避免每次构建漂版本。本地开发仍可用上面的下限约束。
-
-安装开发和测试依赖：
-
-```bash
+# 1. 安装依赖
 pip install -e ".[dev]"
+
+# 2. 配置环境变量
+cp .env.example .env            # 填写 POSTGRES_PASSWORD 等
+
+# 3. 应用数据库结构（可选 --seed 灌入产品种子）
+python -m scripts.migrate --seed
+
+# 4. 启动 API
+python -m app.main              # 或 uvicorn app.main:app --reload --port 8000
+
+# 5. 启动前端
+cd frontend && npm ci && npm run dev
 ```
 
-如需本地股票数据源（AKShare / BaoStock）：
+### Docker Compose
 
 ```bash
-pip install akshare baostock
-```
-
-> **务必用项目 `.venv` 运行后端。** 若机器上同时存在多个 Python（例如 Anaconda 与官方
-> Python），只有装了依赖的那个解释器才能跑通完整链路；FAQ 检索依赖
-> `sentence-transformers`（及其 `torch`/`scikit-learn`），缺失时知识类问答会退化为
-> 「暂时无法执行该操作。」。用 `.venv/Scripts/python.exe -m uvicorn ...`（Windows）或
-> `python -m uvicorn ...`（已激活 venv）启动可避免选错解释器。
-
-### 3. 配置环境变量
-
-`DEEPSEEK_API_KEY` 必须设置为操作系统环境变量。程序会在读取该密钥后加载 `.env`，但不会使用 `.env` 覆盖 DeepSeek 密钥。
-
-Windows PowerShell：
-
-```powershell
-$env:DEEPSEEK_API_KEY="your-deepseek-api-key"
-```
-
-Linux / macOS：
-
-```bash
-export DEEPSEEK_API_KEY="your-deepseek-api-key"
-```
-
-在项目根目录创建 `.env`，示例配置如下：
-
-```dotenv
-# Redis
-REDIS_URL=redis://localhost:6379/0
-REDIS_MEMORY_TTL_SECONDS=3600
-
-# PostgreSQL（必需；认证、业务、产品库和 checkpoint 共用）
-POSTGRES_DSN=postgresql://postgres:password@localhost:5432/advisor
-# 或使用以下组件配置：
-# POSTGRES_HOST=localhost
-# POSTGRES_PORT=5432
-# POSTGRES_USER=postgres
-# POSTGRES_PASSWORD=your-password
-# POSTGRES_DB=advisor
-POSTGRES_CONNECT_TIMEOUT=10
-# checkpoint 连接池容量：不同会话可并发执行，每个 superstep 都会写 checkpoint。
-# 上限过小会让并发会话在池上排队，因此显式放开（默认 4/16）。
-POSTGRES_POOL_MIN_SIZE=4
-POSTGRES_POOL_MAX_SIZE=16
-POSTGRES_POOL_TIMEOUT=30
-
-# 管理员 customer_id 白名单，多个值用逗号分隔；与库内 is_admin 取并集。
-# 日常授权请用 finance_agent.cli.bootstrap_admin，这里留空即可。
-# ADMIN_CUSTOMER_IDS=CUST000001,CUST000002
-
-# 运行环境：production 时关闭 /docs 与 OpenAPI。
-# APP_ENV=production
-# 浏览器跨域来源（逗号分隔）。生产必须改成实际上线的前端源。
-# 经本仓库 Nginx 同源反代时留空即可。
-# CORS_ALLOW_ORIGINS=https://your-frontend.example
-# 仅当 API 在反代之后时开启，登录限流才信任 X-Forwarded-For。
-# TRUST_PROXY=true
-# 本地默认 127.0.0.1；容器内必须 0.0.0.0。
-# UVICORN_HOST=127.0.0.1
-
-# Tushare MCP 数据源
-# TUSHARE_MCP_URL=https://your-tushare-mcp-endpoint?token=your-token
-TUSHARE_MCP_TIMEOUT=30
-
-# 本地股票数据源：按顺序「按方法」降级
-DATA_PROVIDER_ORDER=akshare,tushare_mcp,baostock
-AKSHARE_ENABLED=true
-BAOSTOCK_ENABLED=true
-# Tushare 必须先配置 TUSHARE_MCP_URL 才会启用
-TUSHARE_ENABLED=true
-
-# 行情与估值本地缓存：默认锚定仓库根目录的 .cache/quotes，自定义请用绝对路径
-# QUOTE_CACHE_DIR=/abs/path/to/quotes
-# TTL 设为 0 表示关闭缓存
-QUOTE_CACHE_TTL_SECONDS=3600
-
-# 模拟交易限额：充值单笔上限与单笔申购下限（元）
-PORTFOLIO_MAX_DEPOSIT_AMOUNT=10000000
-PORTFOLIO_MIN_ORDER_AMOUNT=100
-
-# 模型和工作流参数
-INTENT_MODEL_PROVIDER=qwen
-INTENT_MODEL=qwen-turbo
-# Qwen 兼容 OpenAI Chat Completions 的 endpoint 和 API key
-INTENT_MODEL_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions
-INTENT_MODEL_API_KEY=your-qwen-api-key
-INTENT_MODEL_TIMEOUT=5
-INTENT_MODEL_MAX_RETRIES=2
-# 分类器在同一次调用里还要输出 profile_facts（用户自述事实候选），512 容易被截断，
-# 截断会让整轮路由变成协议错。
-INTENT_MODEL_MAX_TOKENS=800
-INTENT_MODEL_DEADLINE=15
-# 降级链：主模型不可用（超时/欠费/协议错）时自动回退备用模型，避免单一 provider
-# 故障打断全部分类与路由。一般不填 API key（自动继承 DEEPSEEK_API_KEY）。
-INTENT_FALLBACK_MODEL=deepseek-chat
-INTENT_FALLBACK_BASE_URL=https://api.deepseek.com/v1/chat/completions
-# INTENT_FALLBACK_API_KEY=
-INTENT_FALLBACK_TIMEOUT=20
-INTENT_FALLBACK_DEADLINE=25
-DEEPSEEK_INTENT_MODEL=deepseek-chat
-DEEPSEEK_INTENT_TIMEOUT=30
-DEEPSEEK_INTENT_MAX_RETRIES=1
-LLM_REQUEST_TIMEOUT=45
-LLM_MAX_RETRIES=1
-FINAL_SYNTHESIS_TIMEOUT=20
-POLICY_NEWS_MAX_DAYS=3
-POLICY_NEWS_MAX_ITEMS=50
-PRODUCT_ANALYSIS_TEMPERATURE=0.2
-
-# 混合 LangGraph 编排预算（单一执行路径：Supervisor Graph）
-# 这些变量是 RunBudgets 的唯一数值源，经 Pydantic 校验后注入会话 ReAct、
-# 单轮扇出的领域数、缺参追问次数、合规改写与图递归上限
-# （上限为全局硬天花板，见 orchestration/budgets.py）。
-ORCHESTRATION_REACT_STEPS=4
-ORCHESTRATION_MAX_DOMAINS=4
-ORCHESTRATION_CLARIFY_ROUNDS=2
-ORCHESTRATION_COMPLIANCE_REWRITES=1
-ORCHESTRATION_GRAPH_STEPS=32
-# 端到端墙钟上限：步数上限只约束"走了多少步"，管不住"某一步卡多久"。
-# TURN_DEADLINE 是图内强制的**整轮**执行上限（单领域与多领域共用），
-# TURN_TIMEOUT 是 API/SSE 层的等待上限；两者必须满足 TIMEOUT >= DEADLINE，
-# 否则用户会先看到超时而执行线程仍在跑（构造时校验）。
-ORCHESTRATION_TURN_TIMEOUT=180
-ORCHESTRATION_TURN_DEADLINE=120
-# 板块/概念筛选的数据量预算：每轮最多对多少只板块成分做确定性评估、
-# 最终返回多少只候选（返回条数不得超过评估条数）。每只候选要逐只取数，
-# 调大等于让整轮更容易撞上 TURN_DEADLINE。
-ORCHESTRATION_SCREEN_MAX_EVALUATIONS=10
-ORCHESTRATION_SCREEN_MAX_RESULTS=5
-
-# 数据源守门：akshare/baostock 内部多数请求不设 socket 超时，
-# 由 ProviderManager 在调用边界强制超时，并熔断连续失败的源。
-DATA_PROVIDER_TIMEOUT=20
-DATA_PROVIDER_FAILURE_THRESHOLD=3
-DATA_PROVIDER_COOLDOWN=60
-
-# 板块（概念/行业）取数：东财板块接口只挂在 *.push2.eastmoney.com 上，该域名在部分
-# 网络环境会连续数分钟 502/断连，因此这里给出可轮换的主机列表（也可换成可达镜像）。
-# 单类型总预算必须显著小于 DATA_PROVIDER_TIMEOUT，否则会先撞上看门狗超时。
-EM_BOARD_BASE_URLS=https://17.push2.eastmoney.com,https://push2.eastmoney.com,https://79.push2.eastmoney.com
-EM_BOARD_TIMEOUT=4
-EM_BOARD_DEADLINE=10
-EM_BOARD_MAX_PAGES=8
-
-# Celery 量化计算：独立 Redis DB + 专用队列
-CELERY_REDIS_DB=1
-CELERY_QUANT_QUEUE=finance.quant
-CELERY_TASK_SOFT_TIME_LIMIT=60
-CELERY_TASK_HARD_TIME_LIMIT=120
-CELERY_RESULT_EXPIRES=3600
-
-# 本地 FAQ 中文 embedding（默认 CPU，不在启动时联网下载）
-FAQ_EMBEDDING_MODEL=BAAI/bge-small-zh-v1.5
-FAQ_EMBEDDING_DEVICE=cpu
-FAQ_EMBEDDING_MODEL_CACHE_DIR=.cache/models
-# FAQ 检索阈值（已按语料实测校准）
-# 绝对下限：低于该分视为知识库无可靠答案，返回 not_found；
-# 中文短文本相似度天然偏高（域外问题可达 ~0.54，域内改写提问 ~0.61 起），故取 0.57。
-FAQ_MIN_SCORE=0.57
-# 相对比例：只保留与最佳命中足够接近的候选（一问一答场景，弱相关应被排除）。
-FAQ_RELATIVE_SCORE_RATIO=0.85
-```
-
-说明：
-
-- 匿名模式已关闭，`AUTH_REQUIRED` 不需要配置，也不能通过环境变量重新开启匿名访问。
-- PostgreSQL 是唯一的关系型存储；未配置、驱动缺失或无法连接时，服务会显式失败，不会回退到 SQLite。
-- 首次连接时程序会懒建表（安全网）。**部署以** `python -m finance_agent.cli.migrate` **为准**：默认应用结构脚本（`migrations/001`–`004`、`006`、`008`、`011`、`013`、`014`），`CREATE EXTENSION IF NOT EXISTS vector` 后应用 FAQ（`migrations/009`、`010`、`012`）；`--seed` 再执行 `migrations/007_product_seed.sql`（`ON CONFLICT` 幂等）。失败显式退出。**pgvector 只在 FAQ 索引/检索时使用**，不属于 API 启动前置条件；缺少 pgvector 只影响 FAQ，不影响登录、对话与管理接口。
-- **新增列必须配幂等 ALTER。** `migrations/001_base_schema.sql` 用的是 `CREATE TABLE IF NOT EXISTS`，对已经建好的库**不会补列**。因此给既有表加列时，不能只改 001 的建表语句，必须在编号更大的脚本里同时加一条 `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`（参照 `006`/`013`）。漏掉这一步会让旧库缺列——历史上 `products.recommended_holding_period` 就是这样丢的，并连带 `migrations/007_product_seed.sql` 无法应用。可用下面的漂移诊断工具把关：
-- 管理员接口（clear-records、商品上下架、用户总览）依赖两条路径，取并集：
-  - 库内角色 `finance.users.is_admin`（正式路径，可用 `finance_agent.cli.bootstrap_admin` 授予）；
-  - 环境变量 `ADMIN_CUSTOMER_IDS` 白名单（兼容路径，逗号分隔的 customer_id）。
-
-  两条都不满足时所有管理员接口返回 403，前端会隐藏对应面板。角色查询失败时**失败关闭**（按非管理员处理），不会因数据库故障放行。
-- 混合编排只有一条执行路径：Supervisor Graph（分类 → 会话/澄清 或 领域任务铺开 + `Send` 并行扇出 → 缺参追问 → 汇合 → 统一合规出口）。单领域与多领域走同一条路径，只差扇出数量；异常显式返回 `run_status="failed"`，不会静默回退到任何旧路径。
-- 不要将包含真实密钥的 `.env` 文件提交到版本库。
-
-### 3.1 FAQ 索引、Celery worker 与异步状态
-
-FAQ 索引/检索需要 pgvector 扩展。安装（Debian/Ubuntu 示例）并在业务库启用：
-
-```bash
-apt-get install postgresql-15-pgvector   # 版本需与 PostgreSQL 主版本一致
-psql -d advisor -c 'CREATE EXTENSION IF NOT EXISTS vector;'
-```
-
-FAQ 原文位于 `docs/faq/*.md`，每个问答以 `## FAQ-001 标题` 的二级标题组织（一个问答一个 chunk）。发布索引版本：
-
-```bash
-python -m finance_agent.cli.index_faq --root docs/faq --model-cache-dir .cache/models
-```
-
-该命令先校验全部文档，再在单事务内写入向量与全文值、切换活跃版本；任一文档校验失败则整批不发布。缺少 pgvector 时命令会给出明确的安装提示，不会影响其它功能。
-
-启动 CPU 密集量化计算的独立 worker（使用 `CELERY_REDIS_DB` 的独立 Redis DB 与 `CELERY_QUANT_QUEUE` 队列）：
-
-```bash
-celery -A finance_agent.infrastructure.jobs.celery_app:celery_app worker -Q finance.quant -l info
-```
-
-Celery 任务只计算并写结果，不调用 LangGraph；未在同步预算内完成的量化任务会写入 `AsyncJobRef` 并中断图（`awaiting_quant`），可经鉴权的异步状态端点查询并恢复：
-
-```text
-GET /api/runs/{task_id}
-```
-
-该端点先校验 `(customer_id, conversation_id)` 归属，再读取异步状态或恢复原始 `thread_id` 的图。
-
-checkpoint 的 `thread_id` 为复合键 `v1:{authenticated_user_id}:{conversation_id}`：不同用户的相同 `conversation_id` 不共享状态；旧键仅在确认会话归属后才会被读取并迁移到新键。
-
-### 4. 启动 Redis
-
-确保 Redis 可通过 `REDIS_URL` 连接。例如本地默认地址为：
-
-```text
-redis://localhost:6379/0
-```
-
-### 5. 启动后端
-
-在项目根目录运行：
-
-```bash
-uvicorn finance_agent.main:app --reload --host 127.0.0.1 --port 8000
-```
-
-容器内必须监听 `0.0.0.0`（环境变量 `UVICORN_HOST`，本地默认仍为 `127.0.0.1`）。
-
-启动后可访问：
-
-- API：http://127.0.0.1:8000
-- Swagger：http://127.0.0.1:8000/docs
-- ReDoc：http://127.0.0.1:8000/redoc
-
-### 6. 安装并启动前端
-
-打开另一个终端：
-
-```bash
-cd frontend
-npm install
-npm run dev
-```
-
-访问 http://localhost:5173。前端开发服务器会将 `/api` 请求代理到 `http://127.0.0.1:8000`。
-
-### 7. 一键启动（Windows 开发）
-
-上面 4-6 步合计要开三个终端，且顺序不能错：数据库没就绪就起后端会直接 `connection timeout`。
-`scripts/start-all.ps1` 把整套**开发**环境按依赖顺序拉起，**每一步都等真正就绪才继续**。
-**生产/预发请走下一节 Docker Compose**，不要用本脚本当上线入口。
-
-```powershell
-# 显式调用
-powershell -ExecutionPolicy Bypass -File scripts\start-all.ps1
-```
-
-它按顺序做这些事：
-
-1. 确保 Docker Desktop 已运行，并启动 `postgres-prod` / `redis-prod` 容器；
-2. **用应用自身的配置探测**数据库与 Redis 可连接（不是只看端口通不通，因此能同时验证
-   库名、密码、目标库是否正确）；
-3. 启动后端，并轮询 `/api/health` 直到真正响应；
-4. 启动 Celery worker（量化计算队列）；
-5. 启动前端，并确认它真的能返回页面。
-
-每一步都在独立窗口运行，日志可随时查看。脚本**幂等**：已在运行的服务会被识别并跳过，
-不会重复拉起（Celery 不占固定端口，按进程判重，避免多 worker 争抢同一队列）。
-任一步在超时内未就绪就报错退出，不会谎报成功。
-
-常用参数：
-
-```powershell
-# 只起数据库 + 后端（不跑前端和量化计算）
-.\scripts\start-all.ps1 -SkipCelery -SkipFrontend
-
-# 后端带热重载（改代码即生效）
-.\scripts\start-all.ps1 -Reload
-
-# 指定端口
-.\scripts\start-all.ps1 -BackendPort 8000 -FrontendPort 5173
-```
-
-停止：
-
-```powershell
-# 只停应用进程，保留数据库/Redis 容器
-powershell -ExecutionPolicy Bypass -File scripts\stop-all.ps1
-
-# 连容器一起停
-.\scripts\stop-all.ps1 -IncludeDocker
-```
-
-停止脚本按「本项目进程及其后代」精确终止，而不是按端口杀进程，因此不会误伤同机的其他
-Python/Node 项目。它会额外处理 `uvicorn --reload` 的派生工作进程——该进程命令行不含项目标识，
-且监听 socket 由已被终止的父进程创建（Windows 会把持有者记成那个已死的 PID），是"停了但端口
-还占着"的常见根源。结束后会复核端口是否真正释放并如实报告。
-
-### 8. Docker 预发
-
-生产/预发走 Compose：Postgres（pgvector）、Redis、一次性 `migrate`、API、Celery worker、Nginx 前端。
-密钥只从环境注入，不打进镜像；FAQ embedding 权重不烤进镜像，挂 `.cache/models`。
-Linux 入口：`scripts/start-all.sh`（`docker compose up -d --wait`）。
-
-1. 复制 `.env.example` → `.env`，填 `DEEPSEEK_API_KEY`、`POSTGRES_PASSWORD`、意图模型 key；`APP_ENV=production`。
-2. `docker compose up -d --build`
-3. `docker compose exec api python -m finance_agent.cli.bootstrap_admin --username admin`（生产拒绝弱口令，已在 bootstrap 里）
-4. `docker compose exec api python -m finance_agent.cli.index_faq --root docs/faq`
-5. 打开 `http://localhost`（nginx:80），验证登录、对话、商品货架、健康检查 200
-6. 确认 Celery 容器在跑，否则股票技术指标会停在 processing
-
-首次 FAQ 索引会从 Hugging Face 拉 `BAAI/bge-small-zh-v1.5` 到挂载的 `.cache/models`，之后重启复用。
-同源 Nginx 反代后 `CORS_ALLOW_ORIGINS` 可留空；Compose 已设 `TRUST_PROXY=true`、`UVICORN_HOST=0.0.0.0`。
-
-```bash
-cp .env.example .env
-# 编辑 .env 后：
-./scripts/start-all.sh
-# 或：
+cp .env.example .env            # 填写 POSTGRES_PASSWORD
 docker compose up -d --build
+# 前端: http://localhost/     API: http://localhost/api/health
 ```
 
-## 使用流程
+### 创建管理员
 
-1. 打开前端页面并注册账号（**后台管理员**无需注册，本地开发用内置账号
-   `admin` / `admin123` 直接登录，详见「管理员账号」一节）。
-2. 使用注册的用户名和密码登录。
-3. 登录成功后，前端会在 API 请求中自动携带 `Authorization: Bearer <token>`。
-4. 登录用户可以创建会话、发送投顾问题、查看画像和历史记录。
-5. 注销账户会删除认证记录，以及该用户的会话、画像、模拟交易和其他业务数据。
+```bash
+python -m scripts.bootstrap_admin --username admin --password '你的密码'
+python -m scripts.bootstrap_admin --dry-run          # 只查看角色分布
+```
 
-未登录或令牌无效的业务请求返回 HTTP `401`。访问其他用户的资源返回 HTTP `403`。`customer_id` 仅用于标识当前登录用户，不能通过请求体或 `X-Customer-ID` 请求头伪造身份。
+管理员与普通用户**互斥**：管理员不做模拟交易，普通用户不进后台。角色由 `ADMIN_CUSTOMER_IDS` 环境变量白名单与库内 `finance.users.is_admin` **取并集**判定。生产环境管理员密码至少 12 个字符。管理员账号只走 `python -m scripts.bootstrap_admin` 引导。
 
-### 模拟交易流程
+## 数据模型
 
-前端顶部导航分四个页面，登录后即可切换：
+表结构以 `migrations/*.sql` 为唯一事实源，ORM（`app/db/models/`，基类在 `app/db/base.py`）只做**映射**，不通过 `create_all` 建表。
 
-| 页面 | 路径 | 用途 |
+| 表 | 说明 |
+| --- | --- |
+| `finance.users` / `finance.sessions` | 用户与登录会话 |
+| `finance.products` / `product_holdings` / `product_performance` | 商品、重仓与业绩/净值 |
+| `finance.accounts` / `cash_transactions` | 资金账户与流水账本 |
+| `finance.orders` / `positions` | 委托成交与持仓 |
+| `finance.agent_sessions` / `agent_messages` / `agent_turns` | 投顾会话、公开消息与轮次 |
+| `finance.advisor_profiles` | 用户确认过的风险画像，每个用户一行 |
+| `finance.stock_feature_snapshots` / `finance.stock_features` | 选股用的每日特征快照（只读 ready） |
+
+`checkpoint_*` 由 PgSaver 在首次启动时创建，不是业务表。
+
+迁移清单（`app.db.schema.SCHEMA_APPLY_ORDER`）：
+
+- `001_schema.sql` — 用户、会话、商品、账户、流水、委托、持仓（含旧库补列）
+- `003_advisor.sql` — 投顾会话、消息、轮次与风险画像
+- `004_stock_features.sql` — 股票特征快照
+- `002_seed.sql` — 产品、演示账号与一笔模拟持仓（仅 `--seed` 时应用）
+
+演示账号（`--seed` 之后可登录）：`demo` / `DemoUser#2026`，`admin` / `AdminDemo#2026`。重复灌种会把这两个账号的口令和 demo 的演示持仓重置为脚本中的数字。
+
+### 幂等与并发
+
+- 所有 DDL 用 `IF NOT EXISTS` / `IF EXISTS`，可重复执行。
+- 资金操作接受 `idempotency_key`：同一键重复提交返回首次结果，不重复扣款；并发撞键时把唯一约束冲突转为首次结果重放。
+- 写操作在同一事务内先 `SELECT ... FOR UPDATE` 锁定账户行，避免并发下单超支。
+
+## API
+
+认证与其他接口均以 `Authorization: Bearer <token>` 携带令牌。
+
+| Method | Path | 说明 |
 | --- | --- | --- |
-| 投顾对话 | `/chat` | 原有对话、画像与历史记录 |
-| 商品 | `/market` | 商品货架，按金额或份额申购 |
-| 持仓 | `/positions` | 持仓明细与盈亏，部分/全部卖出，一键清仓 |
-| 账户 | `/account` | 账户数据面板、充值、资金流水与成交记录 |
+| POST | `/api/register` | 注册 |
+| POST | `/api/login` | 登录，签发令牌 |
+| POST | `/api/logout` | 登出 |
+| GET | `/api/me` | 当前用户（含 `is_admin`） |
+| DELETE | `/api/account` | 注销账号 |
+| GET | `/api/health` | 健康检查 |
+| GET | `/api/portfolio/products` | 商品货架 |
+| GET | `/api/portfolio/products/{code}` | 商品详情 |
+| GET | `/api/portfolio/account` | 账户面板 |
+| GET | `/api/portfolio/positions` | 持仓明细 |
+| POST | `/api/portfolio/deposit` | 充值 |
+| POST | `/api/portfolio/orders` | 买入/卖出 |
+| POST | `/api/portfolio/liquidate` | 一键清仓 |
+| GET | `/api/portfolio/orders` | 成交记录 |
+| GET | `/api/portfolio/transactions` | 资金流水 |
+| GET | `/api/admin/users` | 用户总览（管理员） |
+| GET | `/api/admin/users/{customer_id}/portfolio` | 单用户账户与持仓（管理员） |
+| GET | `/api/admin/products` | 完整货架含下架（管理员） |
+| POST | `/api/admin/products` | 新增/更新商品（管理员） |
+| POST | `/api/admin/products/{code}/offline` | 下架（管理员） |
+| POST | `/api/admin/products/{code}/publish` | 上架（管理员） |
+| GET | `/api/agents/health` | 投顾子系统 `ready` 或 `degraded`（普通用户） |
+| GET | `/api/agents/sessions` | 投顾会话，按最近更新排序 |
+| GET | `/api/agents/sessions/{session_id}/messages` | 会话消息 |
+| DELETE | `/api/agents/sessions/{session_id}` | 删除会话并清理 checkpoint |
+| GET / PATCH | `/api/agents/profile` | 读取或保存风险画像 |
+| POST | `/api/agents/chat/stream` | 发起一轮 SSE 对话 |
+| GET | `/api/agents/runs/{request_id}` | 查询轮次，用于断流恢复 |
+| POST | `/api/agents/runs/{request_id}/retry/stream` | 从 checkpoint 重试可重试失败 |
+| POST | `/api/agents/runs/{request_id}/resume/stream` | 提交画像后恢复挂起轮次 |
+| POST | `/api/agents/runs/{request_id}/clarify/stream` | 提交股票澄清后恢复挂起轮次 |
 
-典型路径：先在「账户」充值虚拟资金 → 到「商品」申购 → 在「持仓」查看盈亏并卖出或清仓 →
-回到「账户」核对总资产与盈亏。也可以在「投顾对话」里直接问"我的持仓怎么样""账户里还有多少钱"，
-由账户领域只读地给出同一份口径的数据。
+SSE 事件只有 `run`、`status`、`profile_required`、`clarification_required`、`artifact`、`token`、`warning`、`done`、`error`。事件里没有专家原文、提示词、工具参数、原始工具响应或推理过程。`artifact` 为 `StockResultV1` 公开子集。
 
-与真实交易的区别（均为有意设计）：
-
-- **无初始资金**：账户首次访问自动开立但余额为 0，必须先充值；单笔充值有上限。
-- **按最新净值即时成交**：没有撮合、没有 T+N 确认，买入与赎回都立即完成。
-- **费率未披露时不臆造**：产品费率缺失时照常成交，但订单会带
-  `fee_unavailable:*` 限制项并在界面提示，不会静默按某个猜测值计算。
-- **无净值不可交易**：取不到最新净值的商品仍会展示，但标记为不可申购/不可赎回。
-- **仓容口径不隐藏缺口**：任一持仓缺少净值时，`market_value_complete=false` 且列出
-  `pricing_issues`，界面显式提示市值口径不完整，而不是把市值悄悄算小。
-- **对话不代客操作**：账户领域是只读的，命中"买入/卖出/清仓/充值"只返回引导文案。
-  下单与充值必须由用户在页面显式完成。
-
-### 管理员账号
-
-本地开发环境预置一个管理员账号，用于登录后台（`/admin`）：
-
-| 用户名 | 密码 | customer_id |
-| --- | --- | --- |
-| `admin` | `admin123` | `CUST000088` |
-
-> ⚠️ **仅限本地开发。** 这是开发固定口令，明文落在版本库里，**上线前必须改掉**：
-> 用下面的脚本重置，或改由 `.env` / 部署密钥注入 `FINANCE_ADMIN_PASSWORD`。
-> 生产环境沿用该口令等于把后台开放给任何人。
-
-管理员不是固定账号，而是**角色**：由 `finance.users.is_admin` 决定，
-并与 `ADMIN_CUSTOMER_IDS` 白名单取并集。授予/回收角色用引导脚本（幂等）：
-
-```bash
-# 创建（或提升）admin 并重置其密码；默认把其他用户全部降为普通用户
-python -m finance_agent.cli.bootstrap_admin --username admin --password '你的密码'
-# 也可用环境变量传密码，避免出现在 shell 历史里
-FINANCE_ADMIN_PASSWORD='你的密码' python -m finance_agent.cli.bootstrap_admin --username admin
-# 只查看当前角色分布，不写入
-python -m finance_agent.cli.bootstrap_admin --dry-run
-```
-
-密码不回显、明文不落库（PBKDF2-SHA256 + 随机盐），因此**无法从库或仓库反查**——
-忘记口令时只能按上面的命令重置。
-
-脚本会提示检查 `.env`：白名单与库内角色是并集，把已降级的用户留在
-`ADMIN_CUSTOMER_IDS` 里会让他继续拥有管理员权限，因此日常授权请只用脚本、白名单留空。
-
-管理员与普通用户看到的是**两套互不重叠的界面**：管理员登录后直接进入独立的后台页面
-（`/admin`），不会渲染投顾对话、商品、持仓、账户等用户侧入口；普通用户也进不去 `/admin`
-（前端跳回 `/chat`，后端接口另返回 403 兜底）。角色在本地登录态与服务端不一致时（如刚被
-授予或撤销），前端会在身份刷新后重新校正路由，不会渲染出对方的界面。
-
-未登录访问后台地址时**守卫不做重定向**：登录页由 `App.vue` 依据登录态渲染，此时后台
-`router-view` 根本不挂载，因此不会泄漏任何受保护内容；登录后会被直接送回后台页面。
-改为重定向到 `/chat` 反而会触发 Vue Router 的"重定向到自身"判定并中止整次导航，
-把地址栏留在 `/admin/*`。
-
-后台按功能分区成独立页面，通过顶部「后台导航」切换，每页只展示一个功能模块：
-
-| 页面 | 路径 | 用途 |
-| --- | --- | --- |
-| 用户与持仓 | `/admin/users` | 全部用户的资金、持仓数量与盈亏；点开可看某人的持仓明细 |
-| 商品管理 | `/admin/products` | 发行/编辑商品；下架或重新上架 |
-
-`/admin` 重定向到 `/admin/users`。每个子路由都独立标注管理员守卫，不依赖父记录
-`meta` 的隐式合并 —— 守卫漏判会让普通用户直接看到后台，代价太高，不值得省这几行。
-
-用户总览里的账户数字与用户自己在「账户」页看到的同源（都由模拟交易服务计算），
-管理端不另立口径。
-
-下架是**软下架**（`products.is_active=false`），不是删除：
-
-- 商品与历史成交记录都保留。`finance.orders.product_code` 有外键指向
-  `finance.products(code)`，删除有成交记录的商品会直接外键失败；即便删得掉，
-  历史成交与持仓也会失去可解释的标的。
-- 下架后该商品从用户货架消失、不再出现在名称候选里，申购被拒（`product_offline`）。
-- **既有持仓仍然可以赎回** —— 只挡买入，否则用户会被困在无法退出的持仓里。
-
-## API 概览
-
-| 方法 | 路径 | 说明 | 是否需要登录 |
-| --- | --- | --- | --- |
-| `POST` | `/api/register` | 注册用户 | 否 |
-| `POST` | `/api/login` | 登录并获取令牌 | 否 |
-| `POST` | `/api/logout` | 注销当前令牌 | 是 |
-| `GET` | `/api/me` | 获取当前用户信息 | 是 |
-| `POST` | `/api/chat` | 同步投顾对话 | 是 |
-| `POST` | `/api/chat/stream` | SSE 流式投顾对话 | 是 |
-| `POST` | `/api/chat/stop` | 停止指定运行 | 是 |
-| `GET` | `/api/profile/{customer_id}` | 获取用户投资画像 | 是，仅限本人 |
-| `GET` | `/api/history/{customer_id}` | 获取对话历史 | 是，仅限本人 |
-| `POST` | `/api/conversations/{customer_id}` | 创建新会话 | 是，仅限本人 |
-| `GET` | `/api/conversations/{customer_id}` | 获取会话列表 | 是，仅限本人 |
-| `GET` | `/api/conversations/{customer_id}/{conversation_id}/messages` | 获取会话消息 | 是，仅限本人 |
-| `DELETE` | `/api/conversations/{customer_id}/{conversation_id}` | 删除会话 | 是，仅限本人 |
-| `POST` | `/api/reset/{customer_id}` | 重置用户会话 | 是，仅限本人 |
-| `POST` | `/api/admin/clear-records` | 清除记录 | 是，全部清除仅管理员 |
-| `GET` | `/api/admin/users` | 全部用户及账户概览（资金、持仓、盈亏） | 是，仅管理员 |
-| `GET` | `/api/admin/users/{customer_id}/portfolio` | 指定用户的账户与持仓明细 | 是，仅管理员 |
-| `GET` | `/api/admin/products` | 完整商品列表（含已下架） | 是，仅管理员 |
-| `POST` | `/api/admin/products` | 发行/编辑商品 | 是，仅管理员 |
-| `POST` | `/api/admin/products/{code}/offline` | 下架商品（软下架，不可申购） | 是，仅管理员 |
-| `POST` | `/api/admin/products/{code}/publish` | 重新上架商品 | 是，仅管理员 |
-| `DELETE` | `/api/account` | 删除当前账户 | 是 |
-| `GET` | `/api/portfolio/products` | 商品货架（净值、风险等级、费率） | 是 |
-| `GET` | `/api/portfolio/products/{code}` | 单个商品详情 | 是 |
-| `GET` | `/api/portfolio/account` | 账户数据面板 | 是 |
-| `GET` | `/api/portfolio/positions` | 持仓明细（含浮动盈亏） | 是 |
-| `POST` | `/api/portfolio/deposit` | 充值虚拟资金 | 是 |
-| `POST` | `/api/portfolio/orders` | 申购 / 赎回 | 是 |
-| `POST` | `/api/portfolio/liquidate` | 一键清仓 | 是 |
-| `GET` | `/api/portfolio/orders` | 成交记录 | 是 |
-| `GET` | `/api/portfolio/transactions` | 资金流水 | 是 |
-| `GET` | `/api/health` | 服务健康检查 | 否 |
-
-完整请求和响应结构请以 Swagger 文档为准。
-
-模拟交易接口的身份**只从 Bearer Token 解析**，路径与请求体都不带 `customer_id`，
-因此不存在通过参数读取他人账户的可能。所有写接口（充值、下单、清仓）都接受可选的
-`idempotency_key`：同一键重复提交只入账一次，用于抵御网络重试造成的重复扣款。
-资金操作在单个数据库事务内完成并对账户行加锁，避免并发下单超支。
-
-### 注册和登录示例
+股票三场景都走同步 SSE。选股读取本地 ready 快照，不在 Web 进程里刷新：
 
 ```bash
-# 注册
-curl -X POST "http://127.0.0.1:8000/api/register" \
-  -H "Content-Type: application/json" \
-  -d '{"username":"alice","password":"password123","display_name":"Alice"}'
-
-# 登录，保存返回的 token 和 customer_id
-curl -X POST "http://127.0.0.1:8000/api/login" \
-  -H "Content-Type: application/json" \
-  -d '{"username":"alice","password":"password123"}'
+python -m scripts.refresh_stock_features --as-of 2026-09-26
 ```
 
-### 登录后发起对话
+同一快照 + 同一策略 + 同一观察周期会得到同一排序。快照晚于最新交易日 3 个自然日以内仍可用并带 `stock_snapshot_stale_warning`；超过 3 日选股失败且 `retryable=True`。Fuyao 未配置时总览失败并警告；深研/选股按缺失上游降级，不编造涨跌幅。Tushare 只提供新闻事件标签，正文不进入结果。
 
-将登录接口返回的令牌替换为 `<token>`。请求身份只从 Bearer Token 解析，不要传 `X-Customer-ID`：
+候选池禁止买卖指令、目标价和仓位比例。数字必须有来源和截止时间。
+
+## 环境变量
+
+| 变量 | 说明 |
+| --- | --- |
+| `POSTGRES_PASSWORD` | **必填**，数据库密码 |
+| `POSTGRES_DSN` | 可选；设置后优先于分项连接参数 |
+| `POSTGRES_HOST` / `POSTGRES_PORT` / `POSTGRES_USER` / `POSTGRES_DB` | 连接参数（默认 `localhost:5432` / `postgres` / `advisor`） |
+| `APP_ENV` | `production` 时关闭 `/docs` 与 OpenAPI |
+| `CORS_ALLOW_ORIGINS` | 允许的跨域来源（逗号分隔） |
+| `TRUST_PROXY` | 位于反代之后时置 `true`，限流才信任 `X-Forwarded-For` |
+| `ADMIN_CUSTOMER_IDS` | 管理员白名单（逗号分隔），与库内角色取并集 |
+| `AUTH_RATE_LIMIT_ATTEMPTS` / `AUTH_RATE_LIMIT_WINDOW_SECONDS` | 登录/注册限流 |
+| `PORTFOLIO_MAX_DEPOSIT_AMOUNT` / `PORTFOLIO_MIN_ORDER_AMOUNT` | 单笔充值上限 / 申购下限 |
+| `FINANCE_SQL_DIR` | 覆盖 `migrations/` 目录位置（容器内用到） |
+| `FINANCE_ADMIN_PASSWORD` | `scripts.bootstrap_admin` 读取的管理员密码 |
+| `ADVISOR_MODEL_API_KEY` | 投顾模型密钥。留空时投顾降级，业务 API 仍可用 |
+| `ADVISOR_MODEL_BASE_URL` | OpenAI-compatible 地址，默认 `https://api.deepseek.com` |
+| `ADVISOR_MODEL_NAME` | 模型名，默认 `deepseek-chat` |
+| `FUYAO_API_KEY` | 行情 MCP 密钥。缺失时总览失败，深研/选股降级 |
+| `TUSHARE_TOKEN` | Tushare Pro 密钥。缺失时消息面不可用，不进入评分 |
+| `AGENT_TURN_TIMEOUT_SECONDS` | 单轮超时，默认 `120`。超时的运行中轮次会标为可重试 |
+| `AGENT_MAX_MESSAGE_CHARS` | 单条消息上限，默认 `4000` |
+| `AGENT_CONTEXT_MESSAGE_LIMIT` | 带入模型的历史消息条数，默认 `20` |
+
+密钥只放在 `.env` 或进程环境里，不写进镜像。
+
+## 故障恢复
+
+1. 浏览器断流后，前端用 `GET /api/agents/runs/{request_id}` 查看轮次。
+2. `completed` 直接显示已保存答案；`interrupted` 按 payload 展示画像表或澄清表；`failed` 且 `retryable` 时调用重试流。
+3. 重试不新增用户消息，沿原 `thread_id` 的最近 checkpoint 继续。
+4. 进程重启后，超过 `AGENT_TURN_TIMEOUT_SECONDS` 仍为 `running` 或 `pending` 的轮次会被标成可重试。
+
+## 运维命令
 
 ```bash
-curl -X POST "http://127.0.0.1:8000/api/chat" \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer <token>" \
-  -d '{
-    "message":"我有10万元，风险偏好稳健，想分析贵州茅台并给出配置建议",
-    "conversation_id":""
-  }'
+python -m scripts.migrate [--seed]                              # 幂等应用结构（+ 种子）
+python -m scripts.bootstrap_admin --username admin [--dry-run]  # 引导管理员
+python -m scripts.diagnose_schema_drift [--keep-probe]          # 结构漂移诊断（CI 可用）
+python -m scripts.verify_portfolio_live                         # 真实 PostgreSQL 模拟交易端到端校验
+python -m scripts.generate_product_seed \
+  --input scripts/data/products.sample.json \
+  --output migrations/002_product_seed.sql                 # 只生成产品 SQL，不进入自动迁移
 ```
 
-查询当前用户：
+## 测试
 
 ```bash
-curl "http://127.0.0.1:8000/api/me" \
-  -H "Authorization: Bearer <token>"
+python -m pytest tests -q
+cd frontend && npm test && npm run build
 ```
 
-## 常用开发命令
+- `tests/unit/` — 设置校验、产品库 ORM 行为、种子生成器
+- `tests/integration/` — 模拟交易服务与 REST、管理后台、鉴权、生产加固、dotenv 导入顺序
+- `tests/architecture/` — 未定义全局名守卫、持久化接缝守卫、生产代码不引用参考实现
+- `tests/contract/` — 迁移顺序与 Compose/镜像包装契约
+- `tests/test_agents/` — 假模型与假 MCP 下的工作流、只读工具和轮次语义
 
-后端编译检查：
+真实 DeepSeek / Fuyao 冒烟测试带 `network` 标记，只有 `RUN_NETWORK_TESTS=1` 且配置了对应密钥时才运行。默认测试不访问这两处。
 
-```bash
-python -m compileall -q finance_agent
-```
+## 开发约定
 
-运行测试：
-
-```bash
-pytest -q
-```
-
-产品数据灌库（产品解读专家的唯一事实来源；数据由运维准备，本仓库不接入外部产品数据源）：
-
-```bash
-# 由结构化数据生成幂等 SQL；校验失败时不产出任何文件
-python -m finance_agent.cli.generate_product_seed \
-  --input finance_agent/cli/data/products.sample.json \
-  --output migrations/007_product_seed.sql
-# 再按既有方式应用到数据库（例如 psql -f migrations/007_product_seed.sql）
-```
-
-生成器只接受 `products` / `holdings` / `performance` 三类记录，按外键顺序输出
-`INSERT ... ON CONFLICT`（明细表先按产品清空再写入，因此可重复执行）；所有值经类型
-白名单与单引号加倍转义。`finance_agent/cli/data/products.sample.json` 是可直接使用的样例。
-
-模拟交易的端到端自检（需要可用的 PostgreSQL；用一次性用户与商品跑完
-充值 → 申购 → 持仓 → 部分赎回 → 清仓 → 注销级联，结束后自动清理）：
-
-```bash
-python -m finance_agent.cli.verify_portfolio_live
-```
-
-该命令走**真实** `PostgresPortfolioStore`，是模拟交易持久化层的实机闸门：改动
-`finance_agent/infrastructure/persistence/postgres/` 下任何 store 之后都必须跑一遍。
-**不变式**：`_PostgresBaseStore` 的子类可以覆写 `transaction()`（在其中调用
-`_ensure_schema()`，`PostgresPortfolioStore` 就是如此），但 `_apply_schema()` 必须用原始
-`TransactionRunner` 跑迁移——`_schema_lock` 是不可重入的 `threading.Lock`，迁移若再经过
-`self.transaction()` 就会与 `_ensure_schema()` 形成同线程自死锁。这类死锁一旦发生在
-事件循环上，整个 API（含 `/api/health`）都会失去响应。
-
-管理员账号的创建与角色授予（幂等；详见「管理员账号」一节）。
-本地开发内置 `admin` / `admin123`，如需更换口令：
-
-```bash
-python -m finance_agent.cli.bootstrap_admin --dry-run                 # 查看当前角色分布
-python -m finance_agent.cli.bootstrap_admin --username admin --password '你的密码'
-```
-
-模拟交易的建表脚本为 `migrations/011_portfolio.sql`（账户、资金流水、委托与持仓）。
-部署时由 `python -m finance_agent.cli.migrate` 统一应用；进程内 `_ensure_schema` / `setup_schema`
-仍作为懒建表安全网，首次访问业务存储时会走同一份 `SCHEMA_APPLY_ORDER`。
-
-管理后台的角色与上下架列为 `migrations/013_admin_console.sql`（`users.is_admin`、
-`products.is_active`）。同样纳入统一 migrate 与懒建表。
-
-库表漂移诊断（对比 `migrations/` 声明的期望结构与线上实际结构，可用于 CI 把关）：
-
-```bash
-python -m finance_agent.cli.diagnose_schema_drift
-```
-
-它会把建表脚本应用到一个一次性探针库作为权威期望结构，再与线上库逐表逐列比对，
-结束后自动删除探针库；线上库只执行只读查询。发现缺失表/列或类型不一致时退出码为 1，
-`--keep-probe` 可保留探针库以便人工检查。
-
-构建前端：
-
-```bash
-cd frontend
-npm run build
-```
-
-## 数据与缓存
-
-- `POSTGRES_DSN`：PostgreSQL 完整连接串；未设置时使用 `POSTGRES_HOST`、`POSTGRES_PORT`、`POSTGRES_USER`、`POSTGRES_PASSWORD` 和 `POSTGRES_DB` 组成连接串。
-- `REDIS_URL`：Redis 地址；保存用户画像、滑动对话窗口和摘要等运行时记忆。
-- 对话记忆（窗口/摘要）的 Redis 键按客户隔离：`finance_cs:conv:{customer_id}:{conversation_id}:window` 与 `:summary`。因此仅凭 `conversation_id` 无法读写他人记忆。升级到本版本后，旧键格式（`finance_cs:conv:{conversation_id}:*`）不会再被读取，会在 TTL 到期后自然淘汰（记忆本身为 best-effort，不影响对话正确性）；`POST /api/admin/clear-records` 的 `finance_cs:*` 扫描仍会清理这些残留键。
-- PostgreSQL 模式下，`users` 是唯一用户主体表，`conversations`、`user_profiles`、`sessions` 和运行审计记录均通过 `customer_id` 关联到已注册用户，不再保留独立的 `customers` 主体表。
-- Tushare MCP 返回的是最近交易日数据，并非交易所盘中实时行情。
-
-### 股票数据源
-
-- 默认顺序为 `DATA_PROVIDER_ORDER=akshare,tushare_mcp,baostock`，并**按方法**降级：某个源未声明该能力（例如 AKShare 的交易日历）不会标记为“降级”，只有真实取数失败才会。`last_metadata` 里 `unsupported` 与 `failures` 是分开的两项。
-- AKShare 日线走新浪源 `stock_zh_a_daily`；东财的 `stock_zh_a_hist` 在部分网络环境下会被按 URL 过滤（TCP 与 TLS 正常但请求被直接关闭），同包内无法修复，因此只作回退。**腾讯源不参与前复权**：它的复权口径与新浪/BaoStock 不同（同一交易日收盘价 1444.42 vs 1435.70），混用会让回测不可复现。
-- 前复权基准口径为**新浪 / BaoStock**（两者逐字节一致）。跨源比对请比**区间收益率**，不要比绝对价格——复权锚点不同是合法差异。
-- 日估值来源：AKShare `stock_value_em`（东财；起点为 `max(2018-01-02, 上市日)`；**不含股息率**）、BaoStock `peTTM/pbMRQ`（免 token，仅沪深）、Tushare `daily_basic`（需 ≥2000 积分；是唯一提供股息率 `dv_ratio`/`dv_ttm` 的来源）。
-- BaoStock **不支持北交所**（`bj.` 报错、`sh.`/`sz.` 会静默返回 0 行），本仓库对北交所代码显式报错。已废止的 `43`/`83`/`87` 开头代码同样显式报错而**不做猜测映射**：末三位规则会把 `830799`（诺思兰德，现行为 `920047`）错指到另一家公司。
-- 行情与估值按 `(provider, code, 复权口径, 日期窗口)` 落盘缓存，默认 TTL 3600 秒，位于仓库根目录 `.cache/quotes`（`QUOTE_CACHE_TTL_SECONDS=0` 可关闭）。缓存写入失败只记告警，不影响取数。
-- 行业与披露日来自东财业绩报表 `stock_yjbb_em`（按报告期，自动回退到最近已披露期）：行业为**申万二级**（如"白酒Ⅱ"）并与 A 股清单合并，供候选搜索的行业关键词匹配；披露日按报告期回填到财务指标。二者均为**补全信息**——取数失败时对应字段缺失、限制项如实呈现，不阻断分析。财务指标接口必须显式传 `start_year`，否则默认 `1900` 会返回 0 行并使基本面评分退化为中性分。
-- 规则版本当前为 `research_rules/v1.2`：**v1.2** 起适配度（suitability）在缺值时不再默认 50.0，改为排除该项按实际可算项加权（此前画像完整的请求会被静默注入中性适配度、可能改变结论）；**v1.1** 补上 PE/PB 后基本面评分由 5 项而不是 3 项平均而成。口径变化必须换版本号，审计记录按其版本号精确重放。旧版本 `v1`/`v1.1` 仍然保留。
-- **使用限制：** 这些第三方行情数据仅供个人研究使用，不得再分发；本地缓存亦仅供本机使用。
-
-## 安全注意事项
-
-- 必须使用 HTTPS 或受信任的内网传输真实登录令牌。
-- 不要将 `DEEPSEEK_API_KEY`、数据库密码或登录令牌写入代码、日志或版本库。
-- 生产环境应限制 PostgreSQL、Redis 和 FastAPI 管理端口的网络访问。
-- 删除账户和 PostgreSQL 身份迁移会清理关联业务数据，执行前请确认数据库备份策略。
-- **上线前必做：**
-  - 设置 `APP_ENV=production`（关闭 `/docs`、`/redoc`、`/openapi.json`，根路径不再枚举接口）。
-  - 设置 `CORS_ALLOW_ORIGINS` 为实际上线的前端源，不要沿用 localhost。
-  - 用 `FINANCE_ADMIN_PASSWORD` + `finance_agent.cli.bootstrap_admin` 创建管理员，**禁止**使用文档中的 `admin` / `admin123`。
-  - 登录/注册有进程内频率限制；多副本部署时请在网关再加一层。
-  - `/api/health` 在 PostgreSQL 不可用或编排无法初始化时返回 HTTP 503；`/api/health/degradation` 仅管理员可访问。
-
-## 常见问题
-
-### 启动时报 DEEPSEEK_API_KEY 错误
-
-请先在当前操作系统会话中设置真实的 `DEEPSEEK_API_KEY`，再启动 Uvicorn。程序不会用 `.env` 文件覆盖该密钥，也不会接受示例占位值。
-
-### Redis 无法连接
-
-确认 Redis 服务已启动，并检查 `REDIS_URL` 的主机、端口和数据库编号。Redis 用于运行时记忆；认证和持久化业务数据始终存储在 PostgreSQL。
-
-### PostgreSQL 模式启动失败
-
-确认已按项目依赖安装 PostgreSQL 驱动与 checkpoint 包，并检查 `POSTGRES_DSN` 或 PostgreSQL 组件配置。缺少依赖、未配置或连接失败时，服务会明确报错，不会回退到 SQLite。
-
-### Tushare MCP 或行情数据不可用
-
-确认 `TUSHARE_MCP_URL` 包含有效端点和 token，并检查 `TUSHARE_MCP_TIMEOUT`。数据源返回的是最近交易日数据，不保证是交易所盘中实时行情。
-
-若 **K 线为空**：先确认 AKShare 的新浪源接口可达（`ak.stock_zh_a_daily`）。东财的 K 线接口在部分网络环境下会被按 URL 过滤，属于环境问题，换 header、换镜像域名都无效。
-
-若 **估值缺失**：确认 `ak.stock_value_em` 或 BaoStock 是否可达，并查看快照的限制项——缺少 PE/PB 现在会以 `fundamental_missing:pe_ttm` 这样的**逐字段**原因码记录，而不是静默降级。注意北交所与已废止代码会被显式拒绝，那属于预期行为。
-
-若 **本地缓存干扰排查**：把 `QUOTE_CACHE_TTL_SECONDS` 设为 `0` 关闭缓存，或删除仓库根目录下的 `.cache/quotes`。
-
-### 商品 / 持仓 / 账户页面没有数据
-
-先分辨是「数据缺失」还是「后端被卡住」：请求 `http://127.0.0.1:8000/api/health`。
-若连一个不存在的路径（例如 `/api/nope`）都超时、而 TCP 仍能连上，说明**事件循环被阻塞**，
-而不是库里没数据。此时停止后端进程并重新启动即可恢复（启动前必须按上文设置
-`DEEPSEEK_API_KEY`，缺失时应用导入即失败，端口被 `--reload` 父进程占着却无人响应，症状与此完全一致）。
-
-根因类别与防线：
-
-- 持仓/账户接口背后是同步 psycopg 调用。模拟交易、管理后台与健康检查的路由因此一律是同步
-  `def`，由 Starlette 放进线程池执行——慢查询只会占住一个 worker，不会冻住 `/api/health`。
-  `tests/architecture/test_api_structure.py::test_blocking_route_handlers_stay_synchronous`
-  会挡住把它改回 `async def` 的改动。
-- 存储层懒建表的自死锁（见「常用开发命令」中 `verify_portfolio_live` 的不变式）曾造成同样的
-  整站无响应；`tests/integration/test_postgres_stores.py` 的看门狗测试守着它。
-- 前端无需改动：接口恢复后刷新浏览器即可看到商品货架、持仓明细与账户面板。
+- **不静默降级**：取不到净值即失败（`PortfolioError`，`code=pricing_unavailable`），不用成本价或 1.0 顶替成交。
+- **阻塞调用不进事件循环**：既有业务路由保持同步 `def`。投顾 SSE 使用异步生成器，因为响应要边生成边写出。
+- **口径唯一**：账户与盈亏只在 `app/services/portfolio_service.py` 计算，路由与管理后台不重算。

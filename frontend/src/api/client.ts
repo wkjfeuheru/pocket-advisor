@@ -1,7 +1,7 @@
 /** 统一 HTTP 客户端。
  *
  * 这是前端**唯一**的 axios 实例：baseURL 固定 `/api`，请求拦截器统一注入
- * `Authorization: Bearer <token>`。各功能模块（chat / portfolio / admin）只在此基础上
+ * `Authorization: Bearer <token>`。各功能模块（portfolio / admin / auth）只在此基础上
  * 拼路径，不再各自 `axios.create`，避免鉴权头、超时与错误口径三处漂移。
  */
 

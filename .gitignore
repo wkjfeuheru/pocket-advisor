@@ -12,7 +12,6 @@ venv/
 .venv/
 env/
 .env
-.cache/huggingface/
 
 # IDE
 .idea/
@@ -23,16 +22,9 @@ env/
 # Build artifacts
 *.tsbuildinfo
 
-# Runtime data
-docs/chroma_db/
-
-# Eval run artifacts (regenerate with `python -m evals.runners.run_all`)
-evals/results/
-
 # Node
 frontend/node_modules/
 frontend/dist/
-.superdesign/tmp/
 .worktrees/
 
 # OS
@@ -41,11 +33,7 @@ Thumbs.db
 
 # Environment (contains secrets)
 .env
-finance_agent/checkpoint.db
-checkpoint.db-shm
-checkpoint.db-wal
-finance_agent/auth.db
-finance_agent/finance_agent.db
-finance_agent/product_library.db
 .cache/
 .trae/
+# pip 临时目录（沙箱下可能因 ACL 无法删除，至少不要提交）
+.piptmp/

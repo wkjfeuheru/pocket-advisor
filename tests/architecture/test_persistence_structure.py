@@ -1,8 +1,8 @@
-"""Guard shared persistence seams (Task 4).
+"""守卫持久化接缝：
 
-Stores, the runtime repository and the FAQ repository must share one connection /
-transaction implementation, and the SQL migration order must live in exactly one
-place. Schema must be applied once per instance, not per business call.
+- 所有数据访问模块共享 ``app.db.session`` 的 ORM session 工厂与幂等建表入口；
+- schema 的应用顺序只在 ``app.db.schema`` 声明一处，而且与 ``migrations/`` 实际文件一致；
+- 各 crud 模块不内联 SQLAlchemy engine（避免绕过共享接缝）。
 """
 
 from __future__ import annotations
@@ -10,242 +10,96 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
-import pytest
-
-
 REPO_ROOT = Path(__file__).resolve().parents[2]
+STORE_MODULES = (
+    "app.crud.user_crud",
+    "app.crud.product_crud",
+    "app.crud.portfolio_crud",
+    "app.crud.stock_feature_crud",
+)
+STORE_PATHS = (
+    REPO_ROOT / "app" / "crud" / "user_crud.py",
+    REPO_ROOT / "app" / "crud" / "product_crud.py",
+    REPO_ROOT / "app" / "crud" / "portfolio_crud.py",
+    REPO_ROOT / "app" / "crud" / "stock_feature_crud.py",
+)
 
 
-def test_every_persistence_adapter_shares_one_transaction_implementation() -> None:
-    from finance_agent.infrastructure.persistence.postgres.transaction import TransactionRunner
-    from finance_agent.infrastructure.persistence.postgres.auth_store import PostgresAuthStore
-    from finance_agent.infrastructure.persistence.postgres.business_store import PostgresBusinessStore
-    from finance_agent.infrastructure.persistence.postgres.portfolio_store import PostgresPortfolioStore
-    from finance_agent.infrastructure.persistence.postgres.product_store import PostgresProductLibrary
-    from finance_agent.infrastructure.persistence.postgres.runtime_repository import PostgresRuntimeRepository
-    from finance_agent.infrastructure.persistence.postgres.faq_repository import PostgresFaqRepository
-    from finance_agent.infrastructure.persistence.postgres.async_run_repository import PostgresAsyncRunRepository
+def test_store_modules_reuse_shared_session_seam() -> None:
+    """每个 crud 模块都从 ``app.db.session`` 取会话/建表接缝，而非自建 engine。"""
+    from app.db import session as db
 
-    for cls in (
-        PostgresBusinessStore,
-        PostgresAuthStore,
-        PostgresPortfolioStore,
-        PostgresProductLibrary,
-        PostgresRuntimeRepository,
-        PostgresFaqRepository,
-        PostgresAsyncRunRepository,
-    ):
-        assert cls._transaction is TransactionRunner.transaction, (
-            f"{cls.__name__} must reuse TransactionRunner.transaction"
+    for module_name in STORE_MODULES:
+        module = __import__(module_name, fromlist=["*"])
+        assert getattr(module, "session_scope") is db.session_scope, (
+            f"{module_name} 必须复用 app.db.session.session_scope"
+        )
+        assert getattr(module, "ensure_schema") is db.ensure_schema, (
+            f"{module_name} 必须复用 app.db.session.ensure_schema"
         )
 
 
-def test_migration_order_is_declared_once() -> None:
-    from finance_agent.infrastructure.persistence.postgres import migrations as postgres_migrations
+def test_models_share_one_declarative_base() -> None:
+    from app.db.models.user import User
+    from app.db.base import Base
+    from app.db.models.portfolio import Account
+    from app.db.models.product import Product
 
-    names = [step.name for step in postgres_migrations.MIGRATIONS]
-    assert names, "migration list must not be empty"
-    # 种子脚本 007 不含结构声明，不应进入迁移序列。
-    assert "007_product_seed.sql" not in names
-    # 主题清理迁移必须在序列末尾，且历史迁移保持编号连续。
-    assert names[-1] == "014_remove_theme_features.sql"
-    numbers = sorted(int(name[:3]) for name in names)
-    assert numbers == sorted(numbers)
-
-    # 序列是结构迁移的唯一事实源：每个脚本只出现一次。
-    assert len(names) == len(set(names))
+    assert issubclass(User, Base)
+    assert issubclass(Product, Base)
+    assert issubclass(Account, Base)
+    assert User.metadata is Base.metadata
 
 
-def test_schema_is_applied_once_per_store_instance() -> None:
-    from finance_agent.infrastructure.persistence.postgres.business_store import PostgresBusinessStore
-
-    class _Cursor:
-        def __init__(self) -> None:
-            self.statements: list[str] = []
-            self.description: list = []
-
-        def execute(self, statement: str, params=()) -> None:
-            self.statements.append(statement)
-
-        def fetchone(self):
-            return None
-
-        def fetchall(self):
-            return []
-
-        def close(self) -> None:
-            pass
-
-    class _Connection:
-        def __init__(self) -> None:
-            self.cursor_instance = _Cursor()
-
-        def cursor(self):
-            return self.cursor_instance
-
-        def commit(self) -> None:
-            pass
-
-        def rollback(self) -> None:
-            pass
-
-        def close(self) -> None:
-            pass
-
-    connections: list[_Connection] = []
-
-    def factory():
-        connection = _Connection()
-        connections.append(connection)
-        return connection
-
-    store = PostgresBusinessStore(factory)
-    store.get_profile("CUST1")
-    store.get_conversation_messages("conv-1", 10)
-    store.list_conversations("CUST1")
-
-    # 首次业务调用完成一次建表（建表自身占一条连接），后续三次业务调用各一条，
-    # 且不得重复执行 DDL。
-    assert len(connections) == 4
-    schema_runs = [c for c in connections if any("CREATE TABLE" in s for s in c.cursor_instance.statements)]
-    assert len(schema_runs) == 1, "schema must be applied exactly once per instance"
+def test_all_store_modules_import_session_scope() -> None:
+    for path in STORE_PATHS:
+        text = path.read_text(encoding="utf-8")
+        assert "from app.db.session import" in text, f"{path.name} 必须从 app.db.session 导入会话接缝"
+        assert "create_engine" not in text, f"{path.name} 不得自行创建 engine"
 
 
-def test_migration_runner_applies_every_script_in_order() -> None:
-    from finance_agent.infrastructure.persistence.postgres.migrations import MIGRATIONS
-    from finance_agent.infrastructure.persistence.postgres.transaction import TransactionRunner
+def test_schema_order_lives_in_one_place_and_matches_files() -> None:
+    from app.db import schema
 
-    class _Cursor:
-        def __init__(self) -> None:
-            self.seen: list[str] = []
-            self.description: list = []
-
-        def execute(self, statement: str, params=()) -> None:
-            for step in MIGRATIONS:
-                if statement == step.sql:
-                    self.seen.append(step.name)
-
-        def close(self) -> None:
-            pass
-
-    class _Connection:
-        def __init__(self) -> None:
-            self.cursor_instance = _Cursor()
-
-        def cursor(self):
-            return self.cursor_instance
-
-        def commit(self) -> None:
-            pass
-
-        def rollback(self) -> None:
-            pass
-
-        def close(self) -> None:
-            pass
-
-    connection = _Connection()
-    runner = TransactionRunner(lambda: connection)
-    from finance_agent.infrastructure.persistence.postgres import migrations as postgres_migrations
-
-    postgres_migrations.run_migrations(runner)
-
-    assert connection.cursor_instance.seen == [step.name for step in MIGRATIONS]
+    sql_dir = schema.sql_dir()
+    for filename in schema.SCHEMA_APPLY_ORDER:
+        assert (sql_dir / filename).is_file(), f"缺少迁移脚本 {filename}"
+    for filename in schema.SEED_SCHEMA_FILES:
+        assert (sql_dir / filename).is_file(), f"缺少种子脚本 {filename}"
+    # 应用顺序里不得重复文件。
+    assert len(set(schema.SCHEMA_APPLY_ORDER)) == len(schema.SCHEMA_APPLY_ORDER)
 
 
-def test_no_module_defines_its_own_transaction_body() -> None:
-    """除 shared runner 外，其它持久化模块不得各自内联 commit/rollback。"""
-    offenders: list[str] = []
-    targets = (
-        REPO_ROOT / "finance_agent" / "infrastructure" / "persistence" / "postgres" / "auth_store.py",
-        REPO_ROOT / "finance_agent" / "infrastructure" / "persistence" / "postgres" / "runtime_repository.py",
-        REPO_ROOT / "finance_agent" / "infrastructure" / "persistence" / "postgres" / "faq_repository.py",
-    )
-    for path in targets:
+def test_no_undefined_global_in_persistence_layer() -> None:
+    """app.db.session 与各 crud 模块不得出现未定义全局名。"""
+    import builtins
+
+    def unresolved(path: Path) -> list[str]:
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        defined = set(dir(builtins))
+        used: set[str] = set()
         for node in ast.walk(tree):
-            if isinstance(node, ast.FunctionDef) and node.name == "_transaction":
-                offenders.append(f"{path.relative_to(REPO_ROOT)}:{node.lineno}")
-    assert offenders == [], (
-        "transaction bodies must live only in postgres_transaction.TransactionRunner:\n"
-        + "\n".join(offenders)
-    )
+            if isinstance(node, (ast.Import, ast.ImportFrom)):
+                for alias in node.names:
+                    defined.add((alias.asname or alias.name).split(".")[0])
+            elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                defined.add(node.name)
+            elif isinstance(node, ast.Name):
+                if isinstance(node.ctx, (ast.Store, ast.Del)):
+                    defined.add(node.id)
+                elif isinstance(node.ctx, ast.Load):
+                    used.add(node.id)
+            elif isinstance(node, ast.arg):
+                defined.add(node.arg)
+            elif isinstance(node, ast.ExceptHandler) and node.name:
+                defined.add(node.name)
+        return sorted(used - defined - {"__file__", "__name__", "__doc__"})
 
-
-def test_faq_domain_repository_is_a_port_and_postgres_code_lives_in_data() -> None:
-    domain_path = REPO_ROOT / "finance_agent" / "domains" / "faq" / "repository.py"
-    adapter_path = REPO_ROOT / "finance_agent" / "infrastructure" / "persistence" / "postgres" / "faq_repository.py"
-    domain_tree = ast.parse(domain_path.read_text(encoding="utf-8"))
-    adapter_tree = ast.parse(adapter_path.read_text(encoding="utf-8"))
-
-    domain_classes = {
-        node.name for node in domain_tree.body if isinstance(node, ast.ClassDef)
-    }
-    adapter_classes = {
-        node.name for node in adapter_tree.body if isinstance(node, ast.ClassDef)
-    }
-    data_imports = [
-        node.module
-        for node in domain_tree.body
-        if isinstance(node, ast.ImportFrom)
-        and node.module
-        and node.module.startswith("finance_agent.infrastructure.persistence.postgres")
-    ]
-    data_imports.extend(
-        alias.name
-        for node in domain_tree.body
-        if isinstance(node, ast.Import)
-        for alias in node.names
-        if alias.name.startswith("finance_agent.infrastructure.persistence.postgres")
-    )
-
-    assert data_imports == [], "FAQ domain ports must not import infrastructure adapters"
-    assert domain_classes == {"FaqRepository", "AsyncRunRepository"}
-    assert "PostgresFaqRepository" in adapter_classes
-    adapter_bases = {
-        base.id
-        for node in adapter_tree.body
-        if isinstance(node, ast.ClassDef)
-        for base in node.bases
-        if isinstance(base, ast.Name)
-    }
-    assert "_PostgresRepository" in adapter_bases
-    async_path = REPO_ROOT / "finance_agent" / "infrastructure" / "persistence" / "postgres" / "async_run_repository.py"
-    async_tree = ast.parse(async_path.read_text(encoding="utf-8"))
-    async_classes = {node.name for node in async_tree.body if isinstance(node, ast.ClassDef)}
-    assert "PostgresAsyncRunRepository" in async_classes
-
-
-def test_schema_application_never_re_enters_overridable_transaction() -> None:
-    """``_apply_schema`` 不得调用 ``self.transaction()`` / ``self._ensure_schema()``。
-
-    ``_schema_lock`` 是不可重入的 ``threading.Lock``，而
-    ``PostgresPortfolioStore.transaction()`` 会在入口调用 ``_ensure_schema()``。
-    若迁移再走 ``self.transaction()``，同一线程会二次申请同一把锁 —— 永久死锁。
-    这个 bug 曾让持仓/账户接口把整个事件循环卡死，前端商品、持仓页全部取不到数据。
-    """
-    path = (
-        REPO_ROOT / "finance_agent" / "infrastructure" / "persistence"
-        / "postgres" / "connection.py"
-    )
-    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-    targets = [
-        node
-        for node in ast.walk(tree)
-        if isinstance(node, ast.FunctionDef) and node.name == "_apply_schema"
-    ]
-    assert len(targets) == 1, "connection.py must define exactly one _apply_schema"
-    observed = targets[0]
+    paths = [REPO_ROOT / "app" / "db" / "session.py", *STORE_PATHS]
     offenders = [
-        call.func.attr
-        for call in ast.walk(observed)
-        if isinstance(call, ast.Call)
-        and isinstance(call.func, ast.Attribute)
-        and isinstance(call.func.value, ast.Name)
-        and call.func.value.id == "self"
-        and call.func.attr in {"transaction", "_ensure_schema"}
+        f"{path.relative_to(REPO_ROOT)}: {', '.join(names)}"
+        for path in paths
+        for names in (unresolved(path),)
+        if names
     ]
-    assert offenders == [], (
-        "_apply_schema 必须用原始 TransactionRunner 跑迁移，"
-        f"不能经过会被子类覆写的入口（发现：{offenders}）"
-    )
+    assert not offenders, "\n".join(offenders)

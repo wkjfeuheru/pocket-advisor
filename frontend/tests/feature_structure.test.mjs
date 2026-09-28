@@ -8,7 +8,7 @@ const frontendRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), 
 const src = path.join(frontendRoot, 'src')
 
 test('frontend pages and components are organized by feature', () => {
-  for (const feature of ['auth', 'chat', 'portfolio', 'research', 'admin']) {
+  for (const feature of ['auth', 'product', 'portfolio', 'admin']) {
     assert.ok(existsSync(path.join(src, 'features', feature)), `${feature} feature directory is missing`)
   }
 
@@ -17,31 +17,32 @@ test('frontend pages and components are organized by feature', () => {
 
   const featureFiles = [
     'features/auth/components/LoginView.vue',
-    'features/auth/components/ProfilePanel.vue',
-    'features/chat/views/ChatView.vue',
-    'features/chat/components/ChatWindow.vue',
-    'features/chat/components/HistoryPanel.vue',
-    'features/chat/components/MessageInput.vue',
-    'features/chat/components/MessageList.vue',
-    'features/chat/components/ParamDialog.vue',
-    'features/chat/components/ScoreCompareChart.vue',
-    'features/chat/components/TechnicalOverviewChart.vue',
-    'features/chat/chartData.ts',
+    'features/product/views/ProductMarketView.vue',
+    'features/product/api.ts',
+    'features/product/types.ts',
     'features/portfolio/views/AccountView.vue',
     'features/portfolio/views/PositionsView.vue',
-    'features/portfolio/views/ProductMarketView.vue',
-    'features/portfolio/components/AllocationCard.vue',
+    'features/portfolio/api.ts',
+    'features/portfolio/types.ts',
     'features/admin/components/AdminUserPanel.vue',
     'features/admin/components/AdminProductPanel.vue',
+    'features/admin/api.ts',
+    'features/admin/types.ts',
   ]
   for (const relativePath of featureFiles) {
     assert.ok(existsSync(path.join(src, relativePath)), `${relativePath} is missing`)
   }
+
+  assert.equal(
+    existsSync(path.join(src, 'features/portfolio/views/ProductMarketView.vue')),
+    false,
+    'product shelf view must live under features/product',
+  )
 })
 
 test('types live in feature directories without a global type barrel', () => {
   assert.equal(existsSync(path.join(src, 'types', 'index.ts')), false, 'global types barrel should be removed')
-  for (const feature of ['auth', 'chat', 'portfolio', 'research', 'admin']) {
+  for (const feature of ['auth', 'product', 'portfolio', 'admin']) {
     assert.ok(existsSync(path.join(src, 'features', feature, 'types.ts')), `${feature} types are missing`)
   }
 })

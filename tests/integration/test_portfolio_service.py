@@ -12,41 +12,18 @@ from datetime import datetime
 
 import pytest
 
-from finance_agent.domains.portfolio import fees
-from finance_agent.domains.portfolio.contracts import AccountSnapshot
-from finance_agent.domains.portfolio.errors import (
-    InsufficientFundsError,
-    InsufficientSharesError,
-    InvalidAmountError,
-    NoPositionError,
-    PricingUnavailableError,
-    ProductNotFoundError,
+from app.schemas.portfolio import AccountSnapshot
+from app.services.portfolio_service import (
+    PortfolioDeps,
+    PortfolioError,
+    PortfolioService,
+    round_shares,
+    subscription_by_amount,
 )
-from finance_agent.domains.portfolio.pricing import NavQuote
-from finance_agent.domains.portfolio.service import PortfolioDeps, PortfolioService
+from app.services.product_service import NavQuote, ProductDeps, ProductError, ProductService, to_rate
 
 
 # ── 内存假存储 ────────────────────────────────────────────────────
-
-class _FakeCursor:
-    """占位游标：假存储不经过 SQL，方法签名保持与真实存储一致。"""
-
-    def execute(self, *args, **kwargs):
-        return None
-
-    def fetchone(self):
-        return None
-
-    def close(self):
-        pass
-
-
-class _FakeConnection:
-    """假连接：``cursor()`` 返回占位游标。"""
-
-    def cursor(self):
-        return _FakeCursor()
-
 
 class _FakeTransaction:
     """假事务：异常时回滚内存快照，与 PostgreSQL 事务语义对齐。"""
@@ -62,7 +39,7 @@ class _FakeTransaction:
             "orders": copy.deepcopy(self._store.orders),
             "transactions": copy.deepcopy(self._store.transactions),
         }
-        return _FakeConnection()
+        return self._store
 
     def __exit__(self, exc_type, exc, tb):
         if exc_type is not None and self._snapshot is not None:
@@ -92,7 +69,7 @@ class _FakeStore:
             }
         return dict(self.accounts[cid])
 
-    def lock_account(self, cursor, customer_id):
+    def lock_account(self, session, customer_id):
         return self.accounts.get(customer_id.upper())
 
     def transaction(self):
@@ -114,13 +91,13 @@ class _FakeStore:
                 return dict(row)
         return None
 
-    def insert_transaction(self, cursor, record):
+    def insert_transaction(self, session, record):
         cid = str(record["customer_id"]).upper()
         key = record.get("idempotency_key") or ""
         if key:
             for row in self.transactions:
                 if row["customer_id"] == cid and row.get("idempotency_key") == key:
-                    from finance_agent.infrastructure.persistence.postgres.connection import UniqueConstraintError
+                    from app.core.security import UniqueConstraintError
                     raise UniqueConstraintError()
         row = dict(record)
         row["customer_id"] = cid
@@ -128,13 +105,13 @@ class _FakeStore:
         self.transactions.append(row)
         return dict(row)
 
-    def insert_order(self, cursor, record):
+    def insert_order(self, session, record):
         cid = str(record["customer_id"]).upper()
         key = record.get("idempotency_key") or ""
         if key:
             for row in self.orders:
                 if row["customer_id"] == cid and row.get("idempotency_key") == key:
-                    from finance_agent.infrastructure.persistence.postgres.connection import UniqueConstraintError
+                    from app.core.security import UniqueConstraintError
                     raise UniqueConstraintError()
         row = dict(record)
         row["customer_id"] = cid
@@ -143,19 +120,19 @@ class _FakeStore:
         self.orders.append(row)
         return dict(row)
 
-    def update_cash_balance(self, cursor, customer_id, cash_balance):
+    def update_cash_balance(self, session, customer_id, cash_balance):
         self.accounts[customer_id.upper()]["cash_balance"] = cash_balance
         self.accounts[customer_id.upper()]["updated_at"] = datetime.now()
 
-    def add_deposit(self, cursor, customer_id, amount):
+    def add_deposit(self, session, customer_id, amount):
         acc = self.accounts[customer_id.upper()]
         acc["total_deposit"] = float(acc["total_deposit"] or 0) + amount
 
-    def get_position_row(self, cursor, customer_id, product_code):
+    def get_position_row(self, session, customer_id, product_code):
         row = self.positions.get((customer_id.upper(), product_code))
         return dict(row) if row else None
 
-    def upsert_position(self, cursor, customer_id, product_code, shares, cost_amount):
+    def upsert_position(self, session, customer_id, product_code, shares, cost_amount):
         key = (customer_id.upper(), product_code)
         if shares <= 0:
             self.positions.pop(key, None)
@@ -210,6 +187,7 @@ class _FakeLibrary:
                 "redemption_fee": raw.get("redemption_fee", ""),
                 "recommended_holding_period": raw.get("recommended_holding_period", ""),
                 "investment_target": raw.get("investment_target", ""),
+                "is_active": raw.get("is_active", True),
             },
             "performance": {"nav": raw.get("nav"), "as_of": raw.get("as_of", ""),
                             "source": "postgresql", "return_1y": raw.get("return_1y"),
@@ -233,8 +211,14 @@ class _FakeLibrary:
                 out.append(item)
         return out
 
-    def list_products(self, product_type="fund"):
-        return [{"code": code} for code in self._products]
+    def list_products(self, product_type="fund", include_inactive=False):
+        kind = (product_type or "fund").strip()
+        return [
+            {"code": code}
+            for code, data in self._products.items()
+            if (include_inactive or data.get("is_active", True))
+            and (kind.lower() == "all" or data.get("type", "fund") == kind)
+        ]
 
 
 class _FakeNavSource:
@@ -274,6 +258,14 @@ def service():
     return PortfolioService(deps)
 
 
+@pytest.fixture()
+def products():
+    return ProductService(ProductDeps(
+        library=_FakeLibrary(PRODUCTS),
+        nav_source=_FakeNavSource({"110011": 3.85, "003003": 1.0}),
+    ))
+
+
 CUSTOMER = "CUST000001"
 
 
@@ -291,12 +283,12 @@ CUSTOMER = "CUST000001"
 ])
 def test_to_rate_normalizes_both_encodings(raw, expected):
     """费率两种编码（数字/百分比字符串）都要归一到小数。"""
-    assert fees.to_rate(raw) == expected
+    assert to_rate(raw) == expected
 
 
 def test_subscription_by_amount_uses_outer_deduction():
     """外扣法：费用 = 金额 - 金额/(1+费率)，扣款不超过申请金额。"""
-    result = fees.subscription_by_amount(10000.0, 3.85, 0.015)
+    result = subscription_by_amount(10000.0, 3.85, 0.015)
     assert result.fee == pytest.approx(147.78, abs=0.01)
     assert result.shares == pytest.approx(2559.01, abs=0.01)
     assert result.cash_out <= 10000.0
@@ -304,56 +296,78 @@ def test_subscription_by_amount_uses_outer_deduction():
 
 def test_round_shares_floors_never_rounds_up():
     """份额向下取整：向上取整会导致扣款超过申请金额。"""
-    assert fees.round_shares(2559.019) == 2559.01
-    assert fees.round_shares(0.0) == 0.0
-    assert fees.round_shares(-5) == 0.0
+    assert round_shares(2559.019) == 2559.01
+    assert round_shares(0.0) == 0.0
+    assert round_shares(-5) == 0.0
 
 
 def test_undisclosed_fee_is_reported_not_assumed_zero():
     """费率未披露时照常成交，但必须登记 fee_unavailable 限制项。"""
-    result = fees.subscription_by_amount(10000.0, 3.85, None)
+    result = subscription_by_amount(10000.0, 3.85, None)
     assert "fee_unavailable:subscription_fee" in result.limitations
     assert result.fee == 0.0
 
 
 # ── 商品 ──────────────────────────────────────────────────────────
 
-def test_list_products_marks_untradable_without_nav(service):
+def test_list_products_marks_untradable_without_nav(products):
     """无净值商品照样上架，但 tradable=False 且带限制项。"""
-    shelf = {item.code: item for item in service.list_products()}
+    shelf = {item.code: item for item in products.list_products()}
     assert shelf["110011"].tradable is True
     assert shelf["999999"].tradable is False
     assert "pricing_unavailable" in shelf["999999"].limitations
     assert shelf["110011"].nav.value == 3.85
 
 
-def test_get_product_rejects_unknown_code(service):
-    with pytest.raises(ProductNotFoundError):
-        service.get_product("000000")
+def test_list_products_filters_fund_etf_and_wealth():
+    """基金列表不含 ETF 和理财；etf、wealth、all 各自只返回对应集合。"""
+    catalog = {
+        "110011": {"name": "混合基金", "type": "fund", "nav": 1.2},
+        "510300": {"name": "沪深300ETF", "type": "etf", "nav": 4.1},
+        "WM001": {"name": "现金理财", "type": "wealth", "nav": 1.01},
+    }
+    service = ProductService(ProductDeps(
+        library=_FakeLibrary(catalog),
+        nav_source=_FakeNavSource({"110011": 1.2, "510300": 4.1, "WM001": 1.01}),
+    ))
+
+    def codes(product_type):
+        return {item.code for item in service.list_products(product_type)}
+
+    assert codes("fund") == {"110011"}
+    assert codes("etf") == {"510300"}
+    assert codes("wealth") == {"WM001"}
+    assert codes("all") == {"110011", "510300", "WM001"}
 
 
-def test_product_view_reads_fees_from_fee_block(service):
+def test_get_product_rejects_unknown_code(products):
+    with pytest.raises(ProductError) as exc:
+        products.get_product("000000")
+    assert exc.value.code == "product_not_found"
+
+
+def test_product_view_reads_fees_from_fee_block(products):
     """产品库把费率列从 basic_info 摘到 fee 子字典；只读 basic_info 会一律显示未披露。"""
-    view = service.get_product("110011")
+    view = products.get_product("110011")
     # 1.5% 以百分比数值返回（前端直接加 %）。
     assert view.subscription_fee == pytest.approx(1.5)
     assert view.redemption_fee == "0.5%"
     assert "fee_unavailable:subscription_fee" not in view.limitations
 
 
-def test_product_view_reports_undisclosed_fee(service):
-    view = service.get_product("999999")
+def test_product_view_reports_undisclosed_fee(products):
+    view = products.get_product("999999")
     assert view.subscription_fee is None
     assert "fee_unavailable:subscription_fee" in view.limitations
 
 
-def test_product_view_passes_through_decimal_ratios(service, monkeypatch):
+def test_product_view_passes_through_decimal_ratios(products, monkeypatch):
     """收益/回撤以小数存储（0.126 表示 12.6%），服务层原样透传，由前端负责换算。"""
     monkeypatch.setitem(PRODUCTS, "110011", {
         "name": "易方达中小盘混合", "nav": 3.85, "subscription_fee": 1.5,
         "redemption_fee": "0.5%", "return_1y": 0.126, "max_drawdown": 0.187,
     })
-    view = service.get_product("110011")
+    view = products.get_product("110011")
     assert view.return_1y == pytest.approx(0.126)
     assert view.max_drawdown == pytest.approx(0.187)
 
@@ -370,15 +384,18 @@ def test_deposit_increases_cash_and_total_deposit(service):
 
 
 def test_deposit_rejects_non_positive_amount(service):
-    with pytest.raises(InvalidAmountError):
+    with pytest.raises(PortfolioError) as exc:
         service.deposit(CUSTOMER, 0)
-    with pytest.raises(InvalidAmountError):
+    assert exc.value.code == "invalid_amount"
+    with pytest.raises(PortfolioError) as exc:
         service.deposit(CUSTOMER, -100)
+    assert exc.value.code == "invalid_amount"
 
 
 def test_deposit_rejects_amount_over_cap(service):
-    with pytest.raises(InvalidAmountError):
+    with pytest.raises(PortfolioError) as exc:
         service.deposit(CUSTOMER, 99_999_999.0)
+    assert exc.value.code == "invalid_amount"
 
 
 def test_deposit_with_same_idempotency_key_does_not_double_credit(service):
@@ -408,8 +425,9 @@ def test_buy_creates_position_and_deducts_cash(service):
 
 def test_buy_rejects_insufficient_funds_without_mutating_account(service):
     service.deposit(CUSTOMER, 1000.0)
-    with pytest.raises(InsufficientFundsError):
+    with pytest.raises(PortfolioError) as exc:
         service.buy(CUSTOMER, "110011", amount=50000.0)
+    assert exc.value.code == "insufficient_funds"
     # 失败不得留下任何痕迹。
     assert service.get_account(CUSTOMER).cash_balance == 1000.0
     assert service.list_positions(CUSTOMER) == []
@@ -418,23 +436,27 @@ def test_buy_rejects_insufficient_funds_without_mutating_account(service):
 def test_buy_rejects_product_without_nav(service):
     """无净值商品必须显式失败，不能用 1.0 顶替成交。"""
     service.deposit(CUSTOMER, 100000.0)
-    with pytest.raises(PricingUnavailableError):
+    with pytest.raises(PortfolioError) as exc:
         service.buy(CUSTOMER, "999999", amount=10000.0)
+    assert exc.value.code == "pricing_unavailable"
     assert service.get_account(CUSTOMER).cash_balance == 100000.0
 
 
 def test_buy_requires_exactly_one_of_amount_or_shares(service):
     service.deposit(CUSTOMER, 100000.0)
-    with pytest.raises(InvalidAmountError):
+    with pytest.raises(PortfolioError) as exc:
         service.buy(CUSTOMER, "110011")
-    with pytest.raises(InvalidAmountError):
+    assert exc.value.code == "invalid_amount"
+    with pytest.raises(PortfolioError) as exc:
         service.buy(CUSTOMER, "110011", amount=1000.0, shares=100)
+    assert exc.value.code == "invalid_amount"
 
 
 def test_buy_below_minimum_amount_is_rejected(service):
     service.deposit(CUSTOMER, 100000.0)
-    with pytest.raises(InvalidAmountError):
+    with pytest.raises(PortfolioError) as exc:
         service.buy(CUSTOMER, "110011", amount=50.0)
+    assert exc.value.code == "invalid_amount"
 
 
 def test_buy_accumulates_weighted_cost_across_two_purchases(service):
@@ -551,14 +573,16 @@ def test_sell_all_removes_position(service):
 def test_sell_rejects_shares_over_holding(service):
     service.deposit(CUSTOMER, 100000.0)
     bought = service.buy(CUSTOMER, "110011", amount=10000.0)
-    with pytest.raises(InsufficientSharesError):
+    with pytest.raises(PortfolioError) as exc:
         service.sell(CUSTOMER, "110011", shares=bought.order.shares + 100)
+    assert exc.value.code == "insufficient_shares"
 
 
 def test_sell_without_position_is_explicit_failure(service):
     service.deposit(CUSTOMER, 100000.0)
-    with pytest.raises(NoPositionError):
+    with pytest.raises(PortfolioError) as exc:
         service.sell(CUSTOMER, "110011", all_shares=True)
+    assert exc.value.code == "no_position"
 
 
 def test_sell_credits_cash_net_of_fee(service):
