@@ -1,9 +1,10 @@
-"""把消毒后的 StockResultV1 收成 AgentResult，去掉买卖指令。"""
+"""把消毒后的 StockResultV1 收成 StockWorkerResult，去掉买卖指令。"""
 
 from __future__ import annotations
 
 from typing import Any
 
+from app.agents.graphs.results import StockWorkerResult
 from app.agents.shared.bans import build_pattern, strip_forbidden
 from app.agents.stock.contracts import StockRequest, StockResultV1
 from app.agents.stock.evidence import apply_evidence_guard, public_stock_artifact
@@ -23,7 +24,7 @@ def _public_artifact(payload: dict[str, Any]) -> dict[str, Any]:
     return public_stock_artifact(payload)
 
 
-def render_stock_result(result: StockResultV1 | dict[str, Any], request: StockRequest) -> dict[str, Any]:
+def render_stock_result(result: StockResultV1 | dict[str, Any], request: StockRequest) -> StockWorkerResult:
     payload = result.model_dump() if hasattr(result, "model_dump") else dict(result)
     guarded = apply_evidence_guard(payload, request)
     summary = _strip_orders(str(guarded.get("summary") or ""))
@@ -37,18 +38,15 @@ def render_stock_result(result: StockResultV1 | dict[str, Any], request: StockRe
             {"thscode": item.get("thscode"), "name": item.get("name") or "", "score": item.get("score")}
             for item in (guarded["stock_screening"].get("candidates") or [])
         ]
-    return {
-        "agent": "stock_agent",
-        "content": summary,
-        "recommended_product_codes": [],
-        "candidate_stocks": candidates,
-        "artifacts": [artifact],
-        "warnings": list(guarded.get("warnings") or []),
-        "source": ",".join(guarded.get("sources") or []) or "fuyao",
-        "as_of": guarded.get("as_of") or "",
-        "failed": bool(guarded.get("failed")),
-        "stock_result": guarded,
-    }
+    return StockWorkerResult(
+        status="failed" if guarded.get("failed") else "ok",
+        summary=summary,
+        candidate_stocks=[item for item in candidates if item.get("thscode")],
+        artifacts=[artifact],
+        warnings=list(guarded.get("warnings") or []),
+        source=",".join(guarded.get("sources") or []) or "fuyao",
+        as_of=guarded.get("as_of") or "",
+    )
 
 
 __all__ = ["render_stock_result"]

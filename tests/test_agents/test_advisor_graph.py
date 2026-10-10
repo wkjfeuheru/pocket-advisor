@@ -9,6 +9,7 @@ import pytest
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.types import Command
 
+from app.agents.graphs.results import turn_warnings, worker_results
 from app.agents.graphs.state import Intent, IntentResult, RewrittenQuery
 from app.agents.graphs.task_agent import (
     AllBranchesFailed,
@@ -16,6 +17,7 @@ from app.agents.graphs.task_agent import (
     public_token,
 )
 from app.services.portfolio_service import SIMULATED_DISCLAIMER
+from evals.runners._fakes import fake_result
 
 
 class ScriptedModel:
@@ -48,20 +50,18 @@ class ScriptedModel:
 
 
 def _specialist(name: str, *, content: str = "", codes: list[str] | None = None, error: Exception | None = None, warning: str = "", failed: bool = False, candidates: list[dict] | None = None, artifacts: list[dict] | None = None):
-    async def run(task: str, state: dict) -> dict:
+    async def run(task: str, state: dict):
         if error is not None:
             raise error
-        return {
-            "agent": name,
-            "content": content or f"{name}:{task}",
-            "recommended_product_codes": list(codes or []),
-            "candidate_stocks": list(candidates or []),
-            "artifacts": list(artifacts or []),
-            "warnings": [warning] if warning else [],
-            "source": "fake",
-            "as_of": "2026-09-27T00:00:00Z",
-            "failed": failed,
-        }
+        return fake_result(
+            name,
+            content=content or f"{name}:{task}",
+            codes=codes,
+            warning=warning,
+            failed=failed,
+            candidates=candidates,
+            artifacts=artifacts,
+        )
 
     return run
 
@@ -122,9 +122,9 @@ def test_classify_uses_function_calling_and_runs_agents_in_parallel():
     state = asyncio.run(run())
     assert model.structured_method == "function_calling"
     assert set(seen) == {"stock", "product"}
-    names = {item["agent"] for item in state.values["agent_results"]}
+    names = {item.agent for item in worker_results(state.values)}
     assert names == {"stock_agent", "product_agent"}
-    assert SIMULATED_DISCLAIMER in state.values["final_result"]
+    assert SIMULATED_DISCLAIMER in state.values["final"]["answer"]
     human = next(
         message["content"]
         for message in model.compliance_inputs[-1]
@@ -154,11 +154,11 @@ def test_partial_failure_still_aggregates_and_total_failure_stops():
         return await graph.aget_state(config)
 
     state = asyncio.run(run_ok())
-    failed = {item["agent"]: item["failed"] for item in state.values["agent_results"]}
+    failed = {item.agent: item.failed for item in worker_results(state.values)}
     assert failed["stock_agent"] is True
     assert failed["product_agent"] is False
-    assert "upstream body" not in state.values["final_result"]
-    assert any("stock_agent 暂不可用" in item for item in state.values["warnings"])
+    assert "upstream body" not in state.values["final"]["answer"]
+    assert any("stock_agent 暂不可用" in item for item in turn_warnings(state.values))
 
     bad = ScriptedModel(IntentResult(intents=[_intent("stock_agent"), _intent("chat_agent")]), [])
     broken = _graph(bad, {
@@ -227,7 +227,7 @@ def test_profile_interrupt_resumes_on_a_second_graph_without_rewriting_profile()
 
     done = asyncio.run(resume())
     assert done.values["profile_snapshot"]["budget_amount"] == 10000
-    assert SIMULATED_DISCLAIMER in done.values["final_result"]
+    assert SIMULATED_DISCLAIMER in done.values["final"]["answer"]
     assert model.compliance_inputs
 
 
@@ -259,11 +259,11 @@ def test_suitability_blocks_higher_risk_and_rewrites_once():
         return await graph.aget_state(config)
 
     state = asyncio.run(run())
-    assert state.values["suitability_result"]["blocked"] == ["HIGH01"]
-    assert "LOW001" in state.values["suitability_result"]["allowed"]
-    assert "HIGH01" not in (state.values["final_recommendations"] or [])
-    assert state.values["rewrite_count"] == 1
-    assert SIMULATED_DISCLAIMER in state.values["final_result"]
+    assert state.values["suitability"]["blocked"] == ["HIGH01"]
+    assert "LOW001" in state.values["suitability"]["allowed"]
+    assert "HIGH01" not in (state.values["final"]["recommendations"] or [])
+    assert state.values["review"]["rewrite_count"] == 1
+    assert SIMULATED_DISCLAIMER in state.values["final"]["answer"]
 
 
 def test_second_violation_falls_back_to_a_safe_template():
@@ -291,9 +291,9 @@ def test_second_violation_falls_back_to_a_safe_template():
         return await graph.aget_state(config)
 
     state = asyncio.run(run())
-    assert "HIGH01" not in state.values["final_result"]
-    assert state.values["final_recommendations"] == []
-    assert SIMULATED_DISCLAIMER in state.values["final_result"]
+    assert "HIGH01" not in state.values["final"]["answer"]
+    assert state.values["final"]["recommendations"] == []
+    assert SIMULATED_DISCLAIMER in state.values["final"]["answer"]
 
 
 def test_public_token_keeps_only_compliance_node_text():
@@ -328,10 +328,10 @@ def test_stock_failed_flag_does_not_fail_turn_when_product_succeeds():
         return await graph.aget_state(config)
 
     state = asyncio.run(run())
-    failed = {item["agent"]: item["failed"] for item in state.values["agent_results"]}
+    failed = {item.agent: item.failed for item in worker_results(state.values)}
     assert failed["stock_agent"] is True
     assert failed["product_agent"] is False
-    assert SIMULATED_DISCLAIMER in state.values["final_result"]
+    assert SIMULATED_DISCLAIMER in state.values["final"]["answer"]
 
 
 def test_stock_and_product_failed_flags_fail_the_turn():
@@ -383,10 +383,10 @@ def test_suitability_ignores_candidate_stocks():
         return await graph.aget_state(config)
 
     state = asyncio.run(run())
-    suitability = state.values["suitability_result"]
+    suitability = state.values["suitability"]
     assert "600519.SH" not in (suitability.get("blocked") or [])
     assert "600519.SH" not in (suitability.get("allowed") or [])
-    assert "600519.SH" not in (state.values["final_recommendations"] or [])
+    assert "600519.SH" not in (state.values["final"]["recommendations"] or [])
 
 
 def test_compliance_node_gets_stock_summary_and_strips_trade_language():
@@ -434,7 +434,7 @@ def test_compliance_node_gets_stock_summary_and_strips_trade_language():
     assert "指数偏强" in human or "000001.SH" in human
     assert "SECRET_MCP" not in human
     assert "raw_mcp" not in human
-    text = state.values["final_result"]
+    text = state.values["final"]["answer"]
     for token in ("买入", "卖出", "加仓", "减仓", "目标价", "买卖点", "仓位比例"):
         assert token not in text
     assert SIMULATED_DISCLAIMER in text
@@ -518,7 +518,7 @@ def test_first_turn_skips_rewrite():
 
     state = asyncio.run(run())
     assert model.rewrite_inputs == []
-    assert state.values.get("resolved_task", "") == ""
+    assert not state.values.get("resolved_task")
 
 
 def test_rewrite_failure_degrades_to_original_message():
@@ -565,7 +565,127 @@ def test_rewrite_failure_degrades_to_original_message():
         return await graph.aget_state(config)
 
     state = asyncio.run(run())
-    assert state.values["final_result"]
-    warnings = [str(item) for item in state.values.get("warnings") or []]
+    assert state.values["final"]["answer"]
+    warnings = turn_warnings(state.values)
     assert any("问题理解" in item for item in warnings)
     assert parent.rewrite_inputs  # 改写确实被调用过
+
+
+def test_previous_turn_results_do_not_leak_into_the_next_turn():
+    """同一 thread 的 checkpoint 跨轮保留：上一轮的 worker 结果、告警、门禁、改写状态都不能带进下一轮。"""
+    from app.services.agent_service import _public_artifacts
+
+    model = ScriptedModel(
+        IntentResult(intents=[_intent("stock_agent"), _intent("product_agent")]),
+        ["推荐 X。\n推荐代码: X", "已去掉不适配推荐。\n推荐代码: 无", "夏普比率衡量风险调整后收益。\n推荐代码: 无"],
+        rewritten=RewrittenQuery(task="上一轮的商品任务"),
+    )
+    seen_chat_states: list[dict] = []
+
+    async def chat(task: str, state: dict):
+        seen_chat_states.append(state)
+        return fake_result("chat_agent", content="夏普比率说明")
+
+    graph = _graph(model, {
+        "stock_agent": _specialist(
+            "stock_agent",
+            content="候选池",
+            candidates=[{"thscode": "600519.SH", "name": "贵州茅台", "score": 90}],
+            artifacts=[{"scenario": "market_overview", "summary": "指数平稳", "as_of": "2026-09-27"}],
+        ),
+        "product_agent": _specialist("product_agent", content="商品摘要-第一轮", codes=["X"], warning="nav_stale"),
+        "portfolio_agent": _specialist("portfolio_agent"),
+        "chat_agent": chat,
+    }, {"X": 5})
+    config = {"configurable": {"thread_id": "cross-turn"}}
+    turn_one = [{"id": "u1", "role": "user", "content": "推荐一只基金"}]
+
+    async def run():
+        await graph.ainvoke(
+            {"messages": turn_one, "profile_snapshot": {"risk_level": "R1"}},
+            config,
+            durability="sync",
+        )
+        first = await graph.aget_state(config)
+        model.intent = IntentResult(intents=[_intent("chat_agent")])
+        model.rewritten = None
+        await graph.ainvoke(
+            {
+                "messages": [
+                    *turn_one,
+                    {"id": "a1", "role": "assistant", "content": "已去掉不适配推荐。"},
+                    {"id": "u2", "role": "user", "content": "什么是夏普比率"},
+                ],
+                "profile_snapshot": {"risk_level": "R1"},
+            },
+            config,
+            durability="sync",
+        )
+        return first, await graph.aget_state(config)
+
+    first, second = asyncio.run(run())
+
+    assert first.values["product_result"]["recommended_product_codes"] == ["X"]
+    assert first.values["suitability"]["blocked"] == ["X"]
+    assert first.values["review"]["rewrite_count"] == 1
+    assert "nav_stale" in turn_warnings(first.values)
+
+    values = second.values
+    assert [result.agent for result in worker_results(values)] == ["chat_agent"]
+    assert values["product_result"] is None
+    assert values["stock_result"] is None
+    assert values["suitability"] == {"allowed": [], "blocked": []}
+    assert values["review"] == {"rewrite_count": 0, "needs_rewrite": False, "feedback": ""}
+    assert values["final"]["recommendations"] == []
+    assert turn_warnings(values) == []
+    assert not values.get("resolved_task")
+    assert _public_artifacts(values) == ([], [])
+    assert "product_result" not in seen_chat_states[-1] or seen_chat_states[-1]["product_result"] is None
+    human = next(message["content"] for message in model.compliance_inputs[-1] if message["role"] == "user")
+    assert "商品摘要-第一轮" not in human
+    assert "不适配代码" not in human
+
+
+def test_duplicate_intents_for_one_worker_are_dispatched_once():
+    model = ScriptedModel(
+        IntentResult(intents=[
+            Intent(agent="product_agent", task="查 110011", kind="general", needs_budget=False),
+            Intent(agent="product_agent", task="查 000001", kind="general", needs_budget=False),
+        ]),
+        ["两只基金。\n推荐代码: 无"],
+    )
+    tasks: list[str] = []
+
+    async def product(task: str, state: dict):
+        tasks.append(task)
+        return fake_result("product_agent", content="两只基金")
+
+    graph = _graph(model, {
+        "stock_agent": _specialist("stock_agent"),
+        "product_agent": product,
+        "portfolio_agent": _specialist("portfolio_agent"),
+        "chat_agent": _specialist("chat_agent"),
+    })
+
+    async def run():
+        config = {"configurable": {"thread_id": "dup-intents"}}
+        await graph.ainvoke(
+            {"messages": [{"role": "user", "content": "对比两只基金"}], "profile_snapshot": {"risk_level": "R3"}},
+            config,
+            durability="sync",
+        )
+        return await graph.aget_state(config)
+
+    state = asyncio.run(run())
+    assert len(tasks) == 1
+    assert "110011" in tasks[0] and "000001" in tasks[0]
+    assert [result.agent for result in worker_results(state.values)] == ["product_agent"]
+
+
+def test_chat_result_cannot_carry_product_recommendations():
+    from pydantic import ValidationError
+
+    from app.agents.graphs.results import ChatWorkerResult
+
+    with pytest.raises(ValidationError):
+        ChatWorkerResult(summary="推荐代码: 110011", recommended_product_codes=["110011"])

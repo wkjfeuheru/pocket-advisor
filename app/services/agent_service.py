@@ -13,6 +13,7 @@ from anyio import to_thread
 from langgraph.types import Command
 
 from app.agents.artifacts import public_artifacts
+from app.agents.graphs.results import turn_warnings, worker_results
 from app.agents.graphs.task_agent import (
     STAGE_LABELS,
     AllBranchesFailed,
@@ -569,8 +570,8 @@ class AgentService:
             artifacts, candidates = _public_artifacts(values)
             for artifact in artifacts:
                 yield _event("artifact", artifact)
-            answer = str(values.get("final_result") or "")
-            warnings = [str(item) for item in values.get("warnings") or [] if item]
+            answer = str((values.get("final") or {}).get("answer") or "")
+            warnings = turn_warnings(values)
             for warning in warnings:
                 yield _event("warning", {"message": sanitize_text(warning)})
             # 最终答案已通过 messages 流模式以 token 事件增量下发；
@@ -616,8 +617,6 @@ class AgentService:
         return {
             "messages": messages,
             "profile_snapshot": _profile_snapshot(prepared.profile),
-            "rewrite_count": 0,
-            "needs_rewrite": False,
         }
 
     def _require_session(self, customer_id: str, session_id: str) -> None:
@@ -722,7 +721,7 @@ def _profile_snapshot(profile: dict[str, Any]) -> dict[str, Any]:
 
 def _public_artifacts(values: dict[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     blocked = {"tool_args", "prompt", "reasoning", "kline", "bars"}
-    artifacts, candidates = public_artifacts(values.get("agent_results") or [])
+    artifacts, candidates = public_artifacts(worker_results(values))
     cleaned = [
         {key: value for key, value in item.items() if key not in blocked}
         for item in artifacts

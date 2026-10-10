@@ -10,6 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from app.agents.graphs.results import RESULT_KEYS
 from app.agents.runtime import AgentRuntime
 from app.services.agent_service import AdvisorServiceError, AgentService
 from app.services.portfolio_service import SIMULATED_DISCLAIMER
@@ -106,9 +107,9 @@ class FakeGraph:
             return SimpleNamespace(values={}, tasks=[task], interrupts=())
         return SimpleNamespace(
             values={
-                "final_result": self.answer,
-                "warnings": ["股票行情暂不可用"],
-                "agent_results": self.agent_results,
+                "final": {"answer": self.answer, "recommendations": []},
+                "turn_warnings": ["股票行情暂不可用"],
+                **{RESULT_KEYS[item["agent"]]: item for item in self.agent_results},
             },
             tasks=[],
             interrupts=(),

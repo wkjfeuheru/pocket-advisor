@@ -14,6 +14,7 @@ import pytest
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.types import Command
 
+from app.agents.graphs.results import PortfolioWorkerResult, worker_results
 from app.agents.graphs.state import IntentResult
 from app.agents.graphs.task_agent import build_advisor_graph
 
@@ -55,13 +56,10 @@ class _RecordingRunner:
         }
         chosen = interrupt(payload)
         self.adopted.append(str(chosen.get("plan_id")))
-        return {
-            "agent": "portfolio_agent",
-            "content": f"已采纳方案 {chosen.get('plan_id')}",
-            "artifacts": [{"scenario": "allocation_adopted", "allocation_adopted": chosen}],
-            "warnings": [],
-            "failed": False,
-        }
+        return PortfolioWorkerResult(
+            summary=f"已采纳方案 {chosen.get('plan_id')}",
+            artifacts=[{"scenario": "allocation_adopted", "allocation_adopted": chosen}],
+        )
 
 
 def _graph(model, runner, saver):
@@ -124,16 +122,16 @@ def test_the_graph_suspends_on_the_allocation_branch_and_resumes_on_a_second_gra
     done = asyncio.run(resume())
 
     assert runner.adopted == ["p-moderate"]
-    # 采纳结果落在 agent_results 里（分支是并行 Send 出去的子任务）；
-    # final_result 由 compliance_node 产出，不该指望它复述分支内容。
-    results = list(done.values.get("agent_results") or [])
+    # 采纳结果落在 portfolio_result 通道里（分支是并行 Send 出去的子任务）；
+    # final.answer 由 compliance_node 产出，不该指望它复述分支内容。
+    results = worker_results(done.values)
     adopted = [
         artifact
         for result in results
-        for artifact in (result.get("artifacts") or [])
+        for artifact in result.artifacts
         if artifact.get("scenario") == "allocation_adopted"
     ]
-    assert adopted, f"没有采纳产物；agent_results={results}"
+    assert adopted, f"没有采纳产物；results={results}"
     assert adopted[0]["allocation_adopted"]["plan_id"] == "p-moderate"
 
 
@@ -165,9 +163,9 @@ def test_without_a_runner_the_portfolio_node_stays_a_plain_specialist():
 
     # 没有挂起：直接跑完
     assert state.next == ()
-    results = list(state.values.get("agent_results") or [])
-    contents = " ".join(str(r.get("content") or "") for r in results)
-    assert "组合说明" in contents, f"agent_results={results}"
+    results = worker_results(state.values)
+    contents = " ".join(r.summary for r in results)
+    assert "组合说明" in contents, f"results={results}"
 
 
 def test_a_missing_customer_id_falls_back_instead_of_interrupting():
@@ -189,9 +187,9 @@ def test_a_missing_customer_id_falls_back_instead_of_interrupting():
 
     assert state.next == ()
     assert runner.calls == []
-    results = list(state.values.get("agent_results") or [])
-    contents = " ".join(str(r.get("content") or "") for r in results)
-    assert "组合说明" in contents, f"agent_results={results}"
+    results = worker_results(state.values)
+    contents = " ".join(r.summary for r in results)
+    assert "组合说明" in contents, f"results={results}"
 
 
 def test_a_failing_allocation_runner_falls_back_to_the_specialist():
@@ -218,9 +216,9 @@ def test_a_failing_allocation_runner_falls_back_to_the_specialist():
     state = asyncio.run(run())
 
     assert state.next == ()
-    results = list(state.values.get("agent_results") or [])
-    contents = " ".join(str(r.get("content") or "") for r in results)
-    assert "组合说明" in contents, f"降级后应产出普通分支结果；agent_results={results}"
+    results = worker_results(state.values)
+    contents = " ".join(r.summary for r in results)
+    assert "组合说明" in contents, f"降级后应产出普通分支结果；results={results}"
 
 
 def test_a_non_degradable_error_still_propagates():

@@ -27,28 +27,19 @@ def project_artifact(agent: str, payload: dict[str, Any]) -> dict[str, Any]:
     return projector(dict(payload or {}))
 
 
-def public_artifacts(agent_results: list[Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """遍历专业结果，逐条用它自己的 agent 投影器生成公开 artifact。"""
+def public_artifacts(results: list[Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """遍历结构化 worker 结果，逐条用它自己的投影器生成公开 artifact；候选股只来自股票结果。"""
     artifacts: list[dict[str, Any]] = []
     candidates: list[dict[str, Any]] = []
-    for result in agent_results or []:
-        if not isinstance(result, dict):
-            continue
-        agent = str(result.get("agent") or "")
-        for item in result.get("artifacts") or []:
+    for result in results or []:
+        for item in getattr(result, "artifacts", None) or []:
             if not isinstance(item, dict):
                 continue
-            projected = project_artifact(agent, item)
+            projected = project_artifact(result.agent, item)
             if projected:
                 artifacts.append(projected)
-        for item in result.get("candidate_stocks") or []:
-            if not isinstance(item, dict):
-                continue
-            candidates.append({
-                "thscode": item.get("thscode"),
-                "name": item.get("name") or "",
-                "score": item.get("score"),
-            })
+        for item in getattr(result, "candidate_stocks", None) or []:
+            candidates.append({"thscode": item.thscode, "name": item.name, "score": item.score})
     return artifacts, candidates
 
 

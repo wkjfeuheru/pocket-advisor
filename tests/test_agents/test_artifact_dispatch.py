@@ -3,6 +3,12 @@
 from __future__ import annotations
 
 from app.agents.artifacts import project_artifact, public_artifacts
+from app.agents.graphs.results import (
+    ChatWorkerResult,
+    PortfolioWorkerResult,
+    ProductWorkerResult,
+    StockWorkerResult,
+)
 
 STOCK_PAYLOAD = {
     "scenario": "market_overview",
@@ -63,9 +69,11 @@ def test_unknown_agents_never_leak_the_raw_payload():
 
 def test_public_artifacts_projects_every_result_with_its_own_agent():
     results = [
-        {"agent": "stock_agent", "artifacts": [STOCK_PAYLOAD],
-         "candidate_stocks": [{"thscode": "600519.SH", "name": "贵州茅台", "score": 80.0}]},
-        {"agent": "portfolio_agent", "artifacts": [PORTFOLIO_PAYLOAD], "candidate_stocks": []},
+        StockWorkerResult(
+            artifacts=[STOCK_PAYLOAD],
+            candidate_stocks=[{"thscode": "600519.SH", "name": "贵州茅台", "score": 80.0}],
+        ),
+        PortfolioWorkerResult(artifacts=[PORTFOLIO_PAYLOAD]),
     ]
 
     artifacts, candidates = public_artifacts(results)
@@ -76,10 +84,11 @@ def test_public_artifacts_projects_every_result_with_its_own_agent():
     assert candidates == [{"thscode": "600519.SH", "name": "贵州茅台", "score": 80.0}]
 
 
-def test_public_artifacts_ignores_malformed_results():
+def test_public_artifacts_skips_results_without_artifacts():
     artifacts, candidates = public_artifacts([
-        None,
-        {"agent": "portfolio_agent", "artifacts": [None, "x", PORTFOLIO_PAYLOAD]},
+        ProductWorkerResult(recommended_product_codes=["110011"]),
+        ChatWorkerResult(summary="夏普比率是..."),
+        PortfolioWorkerResult(artifacts=[PORTFOLIO_PAYLOAD]),
     ])
 
     assert [item["schema_version"] for item in artifacts] == ["portfolio-public-v1"]

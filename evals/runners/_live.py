@@ -105,7 +105,7 @@ class LiveHarness:
             "intents": [dict(item) if hasattr(item, "model_dump") else dict(item)
                         for item in values.get("intents") or []],
             "resolved_task": str(values.get("resolved_task") or ""),
-            "final_result": str(values.get("final_result") or ""),
+            "final_result": str((values.get("final") or {}).get("answer") or ""),
             "interrupt": None,
         }
         direct = getattr(snapshot, "interrupts", None) or ()

@@ -1,8 +1,7 @@
-"""投顾图的状态、意图和结果结构。"""
+"""投顾图的状态与意图结构。worker 结果模型见 ``results.py``。"""
 
 from __future__ import annotations
 
-import operator
 from typing import Annotated, Literal
 
 from pydantic import BaseModel, Field
@@ -49,43 +48,72 @@ class RewrittenQuery(BaseModel):
     changed: bool = False
 
 
-class AdvisorState(TypedDict, total=False):
-    """主工作流状态。``agent_results`` 和 ``warnings`` 按并行分支合并。"""
+class Suitability(TypedDict):
+    allowed: list[str]
+    blocked: list[str]
 
-    messages: Annotated[list, add_messages]
-    intents: list[dict]
-    resolved_task: str
-    agent_results: Annotated[list[dict], operator.add]
-    profile_snapshot: dict
-    suitability_result: dict
-    warnings: Annotated[list[str], operator.add]
-    final_result: str | None
-    final_recommendations: list[str]
+
+class ComplianceReview(TypedDict):
     rewrite_count: int
     needs_rewrite: bool
-    guard_feedback: str
+    feedback: str
 
 
-def empty_result(agent: str, warning: str, *, source: str = "", as_of: str = "") -> dict:
-    return {
-        "agent": agent,
-        "content": warning,
-        "recommended_product_codes": [],
-        "candidate_stocks": [],
-        "artifacts": [],
-        "warnings": [warning] if warning else [],
-        "source": source,
-        "as_of": as_of,
-        "failed": True,
-    }
+class FinalAnswer(TypedDict):
+    answer: str
+    recommendations: list[str]
+
+
+class AdvisorState(TypedDict, total=False):
+    """主工作流状态。
+
+    会话 id 即 thread_id，checkpoint 跨轮保留。只有 ``messages`` / ``profile_snapshot``
+    跨轮有意义，其余字段都是本轮数据，由 ``begin_turn`` 在每轮开始时清空（``TURN_SCOPED_KEYS``）。
+    四个 worker 各占一个通道，存 ``app.agents.graphs.results`` 里对应模型的 JSON 形态。
+    """
+
+    messages: Annotated[list, add_messages]
+    profile_snapshot: dict
+    resolved_task: str | None
+    intents: list[dict] | None
+    turn_warnings: list[str] | None
+    stock_result: dict | None
+    product_result: dict | None
+    portfolio_result: dict | None
+    chat_result: dict | None
+    suitability: Suitability | None
+    review: ComplianceReview | None
+    final: FinalAnswer | None
+
+
+TURN_SCOPED_KEYS: tuple[str, ...] = (
+    "resolved_task",
+    "intents",
+    "turn_warnings",
+    "stock_result",
+    "product_result",
+    "portfolio_result",
+    "chat_result",
+    "suitability",
+    "review",
+    "final",
+)
+
+
+def fresh_turn() -> dict:
+    return {key: None for key in TURN_SCOPED_KEYS}
 
 
 __all__ = [
     "AGENT_NAMES",
     "PROFILE_FIELDS",
+    "TURN_SCOPED_KEYS",
     "AdvisorState",
+    "ComplianceReview",
+    "FinalAnswer",
     "Intent",
     "IntentResult",
     "RewrittenQuery",
-    "empty_result",
+    "Suitability",
+    "fresh_turn",
 ]
