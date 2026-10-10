@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from dataclasses import dataclass, field
 from functools import partial
@@ -15,6 +16,7 @@ from app.agents.artifacts import public_artifacts
 from app.agents.graphs.task_agent import (
     STAGE_LABELS,
     AllBranchesFailed,
+    public_token,
 )
 from app.agents.portfolio.branch import ALLOCATION_WAITING_STAGE
 from app.agents.portfolio.contracts import (
@@ -36,6 +38,33 @@ _PROFILE_ENUMS = {
     "investment_goal": {"保本", "收益", "均衡增长", "成长"},
     "liquidity_need": {"高", "中", "低"},
 }
+
+
+def _classify_failure(exc: BaseException) -> tuple[str, bool]:
+    """把图执行异常映射成 (脱敏错误码, 是否可重试)。
+
+    原则：输入/业务/数据类错误是确定性的，重试无意义；网络/限流/超时等瞬时故障才可重试。
+    """
+    if isinstance(exc, AllBranchesFailed):
+        return "all_branches_failed", True
+    # ValueError 族：校验、计划、候选、权重等业务错误——输入不变重试结果也不变。
+    if isinstance(exc, ValueError):
+        return "invalid_input", False
+    # 数据缺失：重试不会凭空产生数据。
+    if isinstance(exc, LookupError):
+        return "not_found", False
+    # 编程错误：重试同样会触发，应修代码而非让用户重试。
+    if isinstance(exc, (TypeError, AttributeError)):
+        return "internal_error", False
+    name = type(exc).__name__.lower()
+    text = str(exc).lower()
+    if "timeout" in name or "timeout" in text:
+        return "timeout", True
+    if "429" in text or ("rate" in text and "limit" in text):
+        return "rate_limited", True
+    if "connection" in name or "connection" in text or "reset by peer" in text:
+        return "connection_error", True
+    return "turn_failed", True
 
 
 class AdvisorServiceError(Exception):
@@ -230,6 +259,12 @@ class AgentService:
                 turn = self.store.update_turn(request_id, status="running")
                 profile = self.store.get_profile(customer_id)
         except UniqueConstraintError as exc:
+            # 唯一约束可能来自两种并发：同一 request_id 重复提交（PK/消息唯一索引），
+            # 或会话已存在活动轮次。前者应按幂等重放处理，不能再报"会话繁忙"。
+            with self.store.transaction():
+                existing = self._owned_turn(customer_id, request_id)
+            if existing is not None:
+                return self._existing_turn(existing)
             raise AdvisorServiceError(409, "会话已有进行中的轮次", code="active_turn") from exc
         return PreparedTurn(
             mode="run",
@@ -431,6 +466,11 @@ class AgentService:
         try:
             async for event in self._consume_graph(customer_id, prepared, graph_input):
                 yield event
+        except (asyncio.CancelledError, GeneratorExit):
+            # 客户端断流或任务被取消：此时不会走 _consume_graph 的 except，
+            # 若不落库，轮次会永久停在 running 并锁死会话（且 running 无法重试）。
+            self._fail(prepared.request_id, "client_disconnected", retryable=True)
+            raise
         finally:
             reset_readonly_services(tokens)
 
@@ -461,15 +501,19 @@ class AgentService:
 
     async def delete_session(self, customer_id: str, session_id: str) -> None:
         customer_id = customer_id.upper()
-        await to_thread.run_sync(self._require_session, customer_id, session_id)
         runtime = self._runtime_getter()
         checkpointer = getattr(runtime, "checkpointer", None)
         if checkpointer is None:
             raise AdvisorServiceError(503, "投顾暂不可用", code="advisor_unavailable")
-        await checkpointer.adelete_thread(str(session_id))
+        # 先删业务记录（唯一事实来源），其返回值即是否真的删掉；
+        # 再删 checkpoint：顺序倒过来会出现"checkpoint 已删、业务记录还在"的不一致。
         deleted = await to_thread.run_sync(self._delete_session_record, customer_id, session_id)
         if not deleted:
             raise AdvisorServiceError(404, "会话不存在", code="session_not_found")
+        try:
+            await checkpointer.adelete_thread(str(session_id))
+        except Exception:  # noqa: BLE001 - checkpoint 清理失败不影响会话已删除的事实
+            logger.warning("checkpoint_cleanup_failed session_id=%s", session_id)
 
     async def _consume_graph(
         self,
@@ -487,6 +531,7 @@ class AgentService:
             "recursion_limit": 40,
         }
         try:
+            streamed_any_token = False
             async for item in runtime.graph.astream(
                 graph_input,
                 config,
@@ -495,6 +540,8 @@ class AgentService:
             ):
                 event = _stream_item(item)
                 if event is not None:
+                    if event["event"] == "token":
+                        streamed_any_token = True
                     if event["event"] == "status":
                         await to_thread.run_sync(
                             self._update_stage,
@@ -503,61 +550,67 @@ class AgentService:
                         )
                     yield event
             snapshot = await runtime.graph.aget_state(config)
-        except AllBranchesFailed:
+
+            # 中断与完成落库同样在 try 内：此时 SSE 响应头已发出，
+            # 落库异常若逃出去会截断数据流并把轮次留在 running。
+            interrupted = _interrupt_value(snapshot)
+            if interrupted is not None:
+                payload = interrupted if isinstance(interrupted, dict) else {"missing_fields": [], "profile": {}}
+                event_name, safe_payload = public_interrupt_payload(payload)
+                await to_thread.run_sync(
+                    self._persist_interrupt,
+                    prepared.request_id,
+                    safe_payload,
+                )
+                yield _event(event_name, safe_payload)
+                return
+
+            values = getattr(snapshot, "values", {}) or {}
+            artifacts, candidates = _public_artifacts(values)
+            for artifact in artifacts:
+                yield _event("artifact", artifact)
+            answer = str(values.get("final_result") or "")
+            warnings = [str(item) for item in values.get("warnings") or [] if item]
+            for warning in warnings:
+                yield _event("warning", {"message": sanitize_text(warning)})
+            # 最终答案已通过 messages 流模式以 token 事件增量下发；
+            # 若本轮未产生流式 token（如模型未流式输出），补发一个完整 token 兜底。
+            if answer and not streamed_any_token:
+                yield _event("token", {"text": answer})
             await to_thread.run_sync(
-                partial(self._fail, prepared.request_id, "all_branches_failed", retryable=True)
+                self._persist_completion,
+                prepared,
+                answer,
+                warnings,
+                artifacts,
+                candidates,
             )
-            yield _event("error", {"code": "all_branches_failed", "retryable": True})
-            return
+            yield _event("done", {
+                "request_id": prepared.request_id,
+                "session_id": prepared.session_id,
+                "answer": answer,
+            })
         except Exception as exc:  # noqa: BLE001 - 返回脱敏错误码，不回传正文
-            logger.error("advisor_turn_failed reason=%s", sanitize_text(type(exc).__name__))
-            await to_thread.run_sync(
-                partial(self._fail, prepared.request_id, "turn_failed", retryable=True)
+            code, retryable = _classify_failure(exc)
+            logger.error(
+                "advisor_turn_failed code=%s reason=%s",
+                code,
+                sanitize_text(type(exc).__name__),
             )
-            yield _event("error", {"code": "turn_failed", "retryable": True})
-            return
-        interrupted = _interrupt_value(snapshot)
-        if interrupted is not None:
-            payload = interrupted if isinstance(interrupted, dict) else {"missing_fields": [], "profile": {}}
-            event_name, safe_payload = public_interrupt_payload(payload)
             await to_thread.run_sync(
-                self._persist_interrupt,
-                prepared.request_id,
-                safe_payload,
+                partial(self._fail, prepared.request_id, code, retryable=retryable)
             )
-            yield _event(event_name, safe_payload)
+            yield _event("error", {"code": code, "retryable": retryable})
             return
-        values = getattr(snapshot, "values", {}) or {}
-        artifacts, candidates = _public_artifacts(values)
-        for artifact in artifacts:
-            yield _event("artifact", artifact)
-        answer = str(values.get("final_result") or "")
-        warnings = [str(item) for item in values.get("warnings") or [] if item]
-        for warning in warnings:
-            yield _event("warning", {"message": sanitize_text(warning)})
-        if answer:
-            # aggregator 产物必须经过 output_guard 后才能离开服务边界。
-            yield _event("token", {"text": answer})
-        await to_thread.run_sync(
-            self._persist_completion,
-            prepared,
-            answer,
-            warnings,
-            artifacts,
-            candidates,
-        )
-        yield _event("done", {
-            "request_id": prepared.request_id,
-            "session_id": prepared.session_id,
-            "answer": answer,
-        })
 
     def _graph_input(self, customer_id: str, prepared: PreparedTurn) -> dict[str, Any]:
         limit = load_advisor_settings().context_message_limit
         with self.store.transaction():
             history = self.store.list_messages(customer_id, prepared.session_id)
+        # 注入的消息必须带落库时的稳定 id：同一个 thread 的 checkpoint 会持续累积历史，
+        # add_messages 以 id 去重，重复注入同一批历史才不会再次追加（否则历史会平方级膨胀）。
         messages = [
-            {"role": item["role"], "content": item["content"]}
+            {"id": item["id"], "role": item["role"], "content": item["content"]}
             for item in history[-max(limit, 1):]
         ]
         return {
@@ -611,6 +664,11 @@ class AgentService:
             "candidate_stocks": list(candidate_stocks or []),
         }
         with self.store.transaction():
+            # 先原子落完成：若轮次已被并发标记为失败/重试，则跳过写消息，
+            # 避免晚到的完成覆盖终态并留下孤立助手消息。
+            if not self.store.complete_turn(prepared.request_id, final_answer=answer):
+                logger.warning("advisor_completion_skipped request_id=%s", prepared.request_id)
+                return False
             self.store.insert_message(
                 prepared.session_id,
                 prepared.request_id,
@@ -618,15 +676,8 @@ class AgentService:
                 answer,
                 metadata,
             )
-            self.store.update_turn(
-                prepared.request_id,
-                status="completed",
-                stage="完成",
-                final_answer=answer,
-                retryable=False,
-                error_code="",
-            )
             self.store.touch_session(prepared.session_id)
+        return True
 
     def _existing_turn(self, turn: dict[str, Any]) -> PreparedTurn:
         status = turn.get("status")
@@ -654,14 +705,9 @@ class AgentService:
             raise AdvisorServiceError(503, "投顾暂不可用", code="advisor_unavailable")
 
     def _fail(self, request_id: str, code: str, *, retryable: bool) -> None:
+        """把仍在活动的轮次标记为失败。已是终态（完成/失败）的轮次不会被覆盖。"""
         with self.store.transaction():
-            self.store.update_turn(
-                request_id,
-                status="failed",
-                stage="失败",
-                error_code=code,
-                retryable=retryable,
-            )
+            self.store.fail_active_turn(request_id, code=code, retryable=retryable)
 
 
 def _profile_snapshot(profile: dict[str, Any]) -> dict[str, Any]:
@@ -699,8 +745,15 @@ def _stream_item(item: Any) -> dict[str, Any] | None:
             if label:
                 return _event("status", {"stage": label})
         return None
-    # 模型消息属于 guard 前的草稿，不能直接暴露。最终答案由
-    # ``_consume_graph`` 在读取通过 output_guard 的状态后发送。
+    if mode == "messages":
+        # payload 形如 (AIMessageChunk, metadata)；只放行 compliance_node 的增量文本，
+        # 专家节点的草稿 token 不进入用户流。最终权威答案仍由 done 事件给出。
+        if isinstance(payload, tuple) and len(payload) >= 2:
+            message, metadata = payload[0], payload[1]
+            text = public_token(message, metadata if isinstance(metadata, dict) else None)
+            if text:
+                return _event("token", {"text": text})
+        return None
     return None
 
 

@@ -16,7 +16,7 @@ from datetime import date, datetime
 from typing import Any, Mapping, Sequence
 from uuid import uuid4
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 
@@ -307,14 +307,21 @@ class PostgresLedgerStore:
             return None
         return {"trade_id": row.trade_id, "trade_key": row.trade_key}
 
-    def mark_plan_adopted(self, plan_id: str, *, adopted_at: datetime) -> None:
+    def mark_plan_adopted(self, plan_id: str, *, adopted_at: datetime) -> bool:
+        """原子抢占方案状态：仅当尚未 adopted 时才写入，返回是否抢到。
+
+        并发或重复采纳时只有一个请求能返回 ``True``，其余为 ``False``，
+        从而堵住"先查状态、再写账本"之间的 TOCTOU 窗口。
+        """
         ensure_schema()
         with session_scope() as session:
-            row = session.get(AllocationPlan, plan_id)
-            if row is None:
-                return
-            row.status = "adopted"
-            row.adopted_at = adopted_at
+            result = session.execute(
+                update(AllocationPlan)
+                .where(AllocationPlan.plan_id == plan_id)
+                .where(AllocationPlan.status != "adopted")
+                .values(status="adopted", adopted_at=adopted_at)
+            )
+            return bool(result.rowcount)
 
     def get_plan(self, plan_id: str) -> dict | None:
         ensure_schema()

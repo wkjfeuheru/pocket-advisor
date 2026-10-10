@@ -1,0 +1,14 @@
+{
+  "cases": [
+    {"case_id": "p01", "intents": [{"agent": "portfolio_agent", "task": "帮我做个性化配置", "kind": "personalized", "needs_budget": false}], "profile_snapshot": {}, "expect_missing": ["risk_level", "investment_horizon", "investment_goal", "liquidity_need"], "note": "全缺"},
+    {"case_id": "p02", "intents": [{"agent": "portfolio_agent", "task": "帮我做个性化配置", "kind": "personalized", "needs_budget": false}], "profile_snapshot": {"risk_level": "R2"}, "expect_missing": ["investment_horizon", "investment_goal", "liquidity_need"], "note": "缺三项"},
+    {"case_id": "p03", "intents": [{"agent": "portfolio_agent", "task": "帮我做个性化配置", "kind": "personalized", "needs_budget": false}], "profile_snapshot": {"risk_level": "R2", "investment_horizon": "中期", "investment_goal": "均衡增长", "liquidity_need": "中"}, "expect_missing": [], "note": "齐全放行"},
+    {"case_id": "p04", "intents": [{"agent": "portfolio_agent", "task": "按预算配置", "kind": "personalized", "needs_budget": true}], "profile_snapshot": {"risk_level": "R2", "investment_horizon": "中期", "investment_goal": "均衡增长", "liquidity_need": "中"}, "expect_missing": ["budget_amount"], "note": "needs_budget 但缺预算"},
+    {"case_id": "p05", "intents": [{"agent": "portfolio_agent", "task": "按预算配置", "kind": "personalized", "needs_budget": true}], "profile_snapshot": {"risk_level": "R2", "investment_horizon": "中期", "investment_goal": "均衡增长", "liquidity_need": "中", "budget_amount": 10000}, "expect_missing": [], "note": "预算齐全放行"},
+    {"case_id": "p06", "intents": [{"agent": "stock_agent", "task": "看看大盘", "kind": "general", "needs_budget": false}], "profile_snapshot": {}, "expect_missing": [], "note": "general 意图不触发门禁"},
+    {"case_id": "p07", "intents": [{"agent": "product_agent", "task": "按风险推荐基金", "kind": "personalized", "needs_budget": false}], "profile_snapshot": {"risk_level": "R3", "investment_horizon": "中期"}, "expect_missing": ["investment_goal", "liquidity_need"], "note": "personalized 产品推荐也过门禁"},
+    {"case_id": "p08", "intents": [{"agent": "stock_agent", "task": "看行情", "kind": "general"}, {"agent": "portfolio_agent", "task": "个性化配置", "kind": "personalized", "needs_budget": false}], "profile_snapshot": {}, "expect_missing": ["risk_level", "investment_horizon", "investment_goal", "liquidity_need"], "note": "混合意图按 personalized 检查"},
+    {"case_id": "p09", "intents": [{"agent": "chat_agent", "task": "闲聊", "kind": "general"}], "profile_snapshot": {}, "expect_missing": [], "note": "纯闲聊不挂起"},
+    {"case_id": "p10", "intents": [{"agent": "portfolio_agent", "task": "配置", "kind": "personalized", "needs_budget": true}], "profile_snapshot": {"risk_level": "R1", "investment_horizon": "长期", "investment_goal": "保值", "liquidity_need": "低"}, "expect_missing": ["budget_amount"], "note": "四字段齐全只缺预算"}
+  ]
+}

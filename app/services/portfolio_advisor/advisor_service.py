@@ -344,6 +344,7 @@ class AdvisorService:
                 navs=navs,
                 nav_as_of=nav_as_of or today,
                 initial_capital=total,
+                request_id=request_id,
             )
         except (AdoptError, AllocationInterruptError) as exc:
             raise AdvisorServiceError(str(exc), code=getattr(exc, "code", "adopt_failed")) from exc

@@ -125,7 +125,7 @@ def test_the_graph_suspends_on_the_allocation_branch_and_resumes_on_a_second_gra
 
     assert runner.adopted == ["p-moderate"]
     # 采纳结果落在 agent_results 里（分支是并行 Send 出去的子任务）；
-    # final_result 由 aggregator 产出，不该指望它复述分支内容。
+    # final_result 由 compliance_node 产出，不该指望它复述分支内容。
     results = list(done.values.get("agent_results") or [])
     adopted = [
         artifact

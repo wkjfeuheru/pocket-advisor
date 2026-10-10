@@ -32,7 +32,7 @@ derivation —— 建仓成交额与现金流份额
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 
 import pytest
 
@@ -120,7 +120,11 @@ class _FakeLedgerStore:
         return None
 
     def mark_plan_adopted(self, plan_id, *, adopted_at):
+        row = self.plans.get(plan_id) or {}
+        if row.get("status") == "adopted" and row.get("adopted_at"):
+            return False
         self.plans[plan_id] = {"plan_id": plan_id, "status": "adopted", "adopted_at": adopted_at}
+        return True
 
     def get_plan(self, plan_id):
         row = self.plans.get(plan_id)
@@ -316,6 +320,13 @@ def test_missing_nav_aborts_the_whole_adoption_instead_of_partially_applying(ser
     positions = {row["product_code"]: row["shares"] for row in store.list_positions("U1")}
     assert positions == {"110011": 800.0, "510300": 100.0}
     assert store.get_account("U1")["cash_balance"] == pytest.approx(0.0)
+
+
+def test_mark_plan_adopted_is_a_one_shot_claim(store):
+    """方案状态抢占只能成功一次，第二次返回 False（并发采纳的原子守卫）。"""
+    assert store.mark_plan_adopted("plan-1", adopted_at=datetime(2026, 9, 28)) is True
+    assert store.mark_plan_adopted("plan-1", adopted_at=datetime(2026, 9, 29)) is False
+    assert store.get_plan("plan-1")["adopted_at"] == datetime(2026, 9, 28)
 
 
 def test_a_deposit_subscribes_units_without_creating_a_return(service, store):

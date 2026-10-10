@@ -24,7 +24,7 @@ class ScriptedModel:
         self.answers = list(answers)
         self.rewritten = rewritten
         self.structured_method = None
-        self.aggregator_inputs: list = []
+        self.compliance_inputs: list = []
         self.rewrite_inputs: list = []
 
     def with_structured_output(self, schema, *, method=None, **kwargs):
@@ -42,7 +42,7 @@ class ScriptedModel:
         return _Structured()
 
     async def astream(self, messages, config=None):
-        self.aggregator_inputs.append(messages)
+        self.compliance_inputs.append(messages)
         text = self.answers.pop(0) if self.answers else "没有更多材料。"
         yield SimpleNamespace(content=text)
 
@@ -127,7 +127,7 @@ def test_classify_uses_function_calling_and_runs_agents_in_parallel():
     assert SIMULATED_DISCLAIMER in state.values["final_result"]
     human = next(
         message["content"]
-        for message in model.aggregator_inputs[-1]
+        for message in model.compliance_inputs[-1]
         if isinstance(message, dict) and message.get("role") == "user"
     )
     assert "行情可用" in human and "产品可用" in human
@@ -228,7 +228,7 @@ def test_profile_interrupt_resumes_on_a_second_graph_without_rewriting_profile()
     done = asyncio.run(resume())
     assert done.values["profile_snapshot"]["budget_amount"] == 10000
     assert SIMULATED_DISCLAIMER in done.values["final_result"]
-    assert model.aggregator_inputs
+    assert model.compliance_inputs
 
 
 def test_suitability_blocks_higher_risk_and_rewrites_once():
@@ -296,11 +296,11 @@ def test_second_violation_falls_back_to_a_safe_template():
     assert SIMULATED_DISCLAIMER in state.values["final_result"]
 
 
-def test_public_token_keeps_only_aggregator_text():
+def test_public_token_keeps_only_compliance_node_text():
     expert = SimpleNamespace(content="EXPERT_SECRET")
     final = SimpleNamespace(content="最终答案")
     assert public_token(expert, {"langgraph_node": "stock_agent"}) is None
-    assert public_token(final, {"langgraph_node": "aggregator"}) == "最终答案"
+    assert public_token(final, {"langgraph_node": "compliance_node"}) == "最终答案"
 
 
 def test_stock_failed_flag_does_not_fail_turn_when_product_succeeds():
@@ -389,7 +389,7 @@ def test_suitability_ignores_candidate_stocks():
     assert "600519.SH" not in (state.values["final_recommendations"] or [])
 
 
-def test_aggregator_gets_stock_summary_and_guard_strips_trade_language():
+def test_compliance_node_gets_stock_summary_and_strips_trade_language():
     model = ScriptedModel(
         IntentResult(intents=[_intent("stock_agent")]),
         ["建议买入并在买卖点加仓，目标价 2000，仓位比例 20%。\n推荐代码: 无"],
@@ -429,7 +429,7 @@ def test_aggregator_gets_stock_summary_and_guard_strips_trade_language():
         return await graph.aget_state(config)
 
     state = asyncio.run(run())
-    human = next(message["content"] for message in model.aggregator_inputs[-1] if message["role"] == "user")
+    human = next(message["content"] for message in model.compliance_inputs[-1] if message["role"] == "user")
     assert "上证综指上涨" in human
     assert "指数偏强" in human or "000001.SH" in human
     assert "SECRET_MCP" not in human

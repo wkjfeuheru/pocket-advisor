@@ -116,7 +116,9 @@ class LedgerStore(Protocol):
 
     def find_trade_by_key(self, customer_id: str, adoption_key: str) -> dict | None: ...
 
-    def mark_plan_adopted(self, plan_id: str, *, adopted_at: datetime) -> None: ...
+    def mark_plan_adopted(self, plan_id: str, *, adopted_at: datetime) -> bool:
+        """原子抢占方案状态；``False`` 表示已被（并发或此前）采纳。"""
+        ...
 
     def get_plan(self, plan_id: str) -> dict | None: ...
 
@@ -252,6 +254,14 @@ class LedgerService:
                     f"{product_code} 缺少可用净值，无法成交", code="missing_nav"
                 )
 
+        # ── 原子抢占方案状态，再动任何一笔 ──────────────────────────────
+        # 放在可行性检查之后、成交之前：并发或重复采纳只有一个请求能抢到，
+        # 其余立即失败；避免"读到未采纳 → 写账本"之间被另一个请求插入导致双写。
+        if not self._store.mark_plan_adopted(plan_id, adopted_at=self._now()):
+            raise LedgerError(
+                f"方案已被采纳，不可重复采纳: {plan_id}", code="already_adopted"
+            )
+
         for product_code in sorted(all_codes):
             current_row = holdings.get(product_code) or {}
             current_value = float(current_row.get("market_value") or 0.0)
@@ -357,7 +367,6 @@ class LedgerService:
             unit_nav=unit_nav,
             nav_as_of=nav_as_of,
         )
-        self._store.mark_plan_adopted(plan_id, adopted_at=self._now())
 
         return AdoptionResult(
             cash_balance=cash,

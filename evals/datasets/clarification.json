@@ -1,0 +1,24 @@
+{
+  "cases": [
+    {"case_id": "cl01", "message": "帮我选几只好股票", "expect": "clarify", "expect_fields": ["strategy", "horizon"], "note": "选股缺 strategy 和 horizon"},
+    {"case_id": "cl02", "message": "按照成长风格帮我选股", "expect": "clarify", "expect_fields": ["horizon"], "note": "有 strategy（growth）缺 horizon"},
+    {"case_id": "cl03", "message": "做一个一年期的价值选股", "expect": "answer", "expect_fields": [], "note": "strategy=价值 horizon=一年，齐全"},
+    {"case_id": "cl04", "message": "分析一下贵州茅台", "expect": "answer", "expect_fields": [], "note": "个股研究不需要 strategy/horizon"},
+    {"case_id": "cl05", "message": "看看这只股票怎么样", "expect": "clarify", "expect_fields": ["symbols"], "note": "单轮无上文，标的缺失"},
+    {"case_id": "cl06", "message": "看看今天大盘怎么样", "expect": "answer", "expect_fields": [], "note": "大盘场景不需要标的"},
+    {"case_id": "cl07", "message": "帮我选几只消费行业的股票，短线操作", "expect": "answer", "expect_fields": [], "note": "行业+期限齐全（strategy 可默认）"},
+    {"case_id": "cl08", "message": "在沪深300里面按低估值帮我选股", "expect": "clarify", "expect_fields": ["horizon"], "note": "有范围有策略缺期限"},
+    {"case_id": "cl09", "message": "分析一下这支票", "expect": "clarify", "expect_fields": ["symbols"], "note": "指示词无实体"},
+    {"case_id": "cl10", "message": "看看我上次说的那只股票最新消息", "expect": "clarify", "expect_fields": ["symbols"], "note": "单轮评测下引用不存在上文"},
+    {"case_id": "cl11", "message": "帮我做一次选股，要求高分红", "expect": "clarify", "expect_fields": ["horizon"], "note": "策略可映射价值/红利，缺期限"},
+    {"case_id": "cl12", "message": "最近哪个板块比较强势？", "expect": "answer", "expect_fields": [], "note": "板块行情，非选股"},
+    {"case_id": "cl13", "message": "帮我选3只科技股，波段操作，持股一两周", "expect": "answer", "expect_fields": [], "note": "数量+行业+期限齐全"},
+    {"case_id": "cl14", "message": "帮我选股，适合长期持有", "expect": "clarify", "expect_fields": ["strategy"], "note": "有期限缺策略"},
+    {"case_id": "cl15", "message": "对比一下茅台和五粮液的技术面", "expect": "answer", "expect_fields": [], "note": "双标的个股研究"},
+    {"case_id": "cl16", "message": "分析一下平安银行", "expect": "clarify", "expect_fields": ["symbols"], "note": "同名歧义：平安银行A股 000001.SZ，需用户确认标的"},
+    {"case_id": "cl17", "message": "帮我选股，价值风格，中期持有，只要消费行业", "expect": "answer", "expect_fields": [], "note": "全参数齐全"},
+    {"case_id": "cl18", "message": "帮我筛选一批低估值的银行股，准备长期拿着收股息", "expect": "answer", "expect_fields": [], "note": "低估值→value_quality，长期→long，齐全"},
+    {"case_id": "cl19", "message": "推荐些潜力股，越快越好", "expect": "clarify", "expect_fields": ["horizon"], "note": "「越快越好」不能确定期限，应追问"},
+    {"case_id": "cl20", "message": "按我的风险偏好帮我选股", "expect": "clarify", "expect_fields": ["strategy", "horizon"], "note": "风险偏好≠策略，strategy/horizon 双缺"}
+  ]
+}

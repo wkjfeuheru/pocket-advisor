@@ -1,0 +1,15 @@
+{
+  "gates": [
+    {"metric": "profile_gate.gate_accuracy", "operator": ">=", "value": 1.0, "label": "画像门禁准确率（离线确定性）"},
+    {"metric": "clarification_offline.all_pass_rate", "operator": ">=", "value": 1.0, "label": "澄清确定性守卫全通过"},
+    {"metric": "fanout.four_domain_speedup", "operator": ">=", "value": 2.5, "label": "4 意图并发扇出加速比"}
+  ],
+  "watch": [
+    {"metric": "intent_routing.routing_accuracy", "operator": ">=", "value": 0.8, "label": "意图路由准确率（live）"},
+    {"metric": "multi_turn.rewrite_accuracy", "operator": ">=", "value": 0.7, "label": "多轮改写准确率（live）"},
+    {"metric": "clarification_live.clarify_recall", "operator": ">=", "value": 0.8, "label": "信息缺失追问召回率（live）"},
+    {"metric": "clarification_live.false_clarify_rate", "operator": "<=", "value": 0.3, "label": "误追问率（live，越低越好）"},
+    {"metric": "clarification_live.clarify_field_coverage", "operator": ">=", "value": 0.7, "label": "澄清字段覆盖率（live）"},
+    {"metric": "stock_scenarios.scenario_accuracy", "operator": ">=", "value": 0.8, "label": "股票场景分类准确率（live）"}
+  ]
+}

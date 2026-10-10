@@ -237,7 +237,15 @@ def client(monkeypatch):
             return None
 
         def mark_plan_adopted(self, plan_id, *, adopted_at):
-            self.plans[plan_id] = {"plan_id": plan_id, "status": "adopted", "adopted_at": adopted_at}
+            row = self.plans.get(plan_id) or {}
+            if row.get("status") == "adopted" and row.get("adopted_at"):
+                return False
+            self.plans[plan_id] = {
+                "plan_id": plan_id,
+                "status": "adopted",
+                "adopted_at": adopted_at,
+            }
+            return True
 
         def get_plan(self, plan_id):
             row = self.plans.get(plan_id)

@@ -20,7 +20,7 @@
 ```text
 START → classify_intent → profile_gate → dispatch_intents
       → stock / product / portfolio / chat（只派发命中的分支）
-      → suitability_guard → aggregator → output_guard → END
+      → suitability_guard → compliance_node（生成 + 合规校验）→ END
 ```
 
 - 个性化建议缺少风险、期限、目标或流动性时，原轮次会挂起。用户在表单里确认后，用原来的 `request_id` 恢复，不必重发问题。涉及金额配置时还要预算。模型不能改写长期画像。
@@ -131,11 +131,6 @@ python -m scripts.bootstrap_admin --dry-run          # 只查看角色分布
 
 演示账号（`--seed` 之后可登录）：`demo` / `DemoUser#2026`，`admin` / `AdminDemo#2026`。重复灌种会把这两个账号的口令和 demo 的演示持仓重置为脚本中的数字。
 
-### 幂等与并发
-
-- 所有 DDL 用 `IF NOT EXISTS` / `IF EXISTS`，可重复执行。
-- 资金操作接受 `idempotency_key`：同一键重复提交返回首次结果，不重复扣款；并发撞键时把唯一约束冲突转为首次结果重放。
-- 写操作在同一事务内先 `SELECT ... FOR UPDATE` 锁定账户行，避免并发下单超支。
 
 ## API
 

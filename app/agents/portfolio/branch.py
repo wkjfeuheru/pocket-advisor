@@ -8,7 +8,7 @@
 
 返回值沿用既有 ``_specialist_node`` 期望的形状（``content`` / ``artifacts`` /
 ``warnings`` / ``recommended_product_codes`` 等），照 ``empty_result`` 的字段补齐，
-这样 aggregator 与 suitability_guard 不需要知道这个分支的存在。
+这样 compliance_node 与 suitability_guard 不需要知道这个分支的存在。
 """
 
 from __future__ import annotations

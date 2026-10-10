@@ -250,6 +250,37 @@ class PostgresAdvisorStore:
         self._db().flush()
         return _profile_dict(row)
 
+    def complete_turn(self, request_id: str, **fields: Any) -> bool:
+        """仅当轮次仍处于活动状态时才落完成，避免覆盖已失败/已重试的轮次。
+
+        返回是否写入（``False`` 表示轮次已是终态，调用方应跳过副作用）。
+        """
+        values = {"status": "completed", "stage": "完成", "retryable": False, "error_code": ""}
+        values.update(fields)
+        result = self._db().execute(
+            update(AgentTurn)
+            .where(AgentTurn.request_id == _uuid(request_id))
+            .where(AgentTurn.status.in_(("pending", "running")))
+            .values(**values, updated_at=_utcnow())
+        )
+        return bool(result.rowcount)
+
+    def fail_active_turn(self, request_id: str, *, code: str, retryable: bool) -> bool:
+        """仅当轮次仍处于活动状态时标记失败，避免覆盖已终态（完成/失败）的轮次。"""
+        result = self._db().execute(
+            update(AgentTurn)
+            .where(AgentTurn.request_id == _uuid(request_id))
+            .where(AgentTurn.status.in_(("pending", "running")))
+            .values(
+                status="failed",
+                stage="失败",
+                error_code=code,
+                retryable=retryable,
+                updated_at=_utcnow(),
+            )
+        )
+        return bool(result.rowcount)
+
     def mark_stale_running(self, timeout_seconds: int) -> int:
         cutoff = _utcnow() - timedelta(seconds=timeout_seconds)
         result = self._db().execute(

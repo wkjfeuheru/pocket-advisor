@@ -100,7 +100,7 @@ def test_the_branch_interrupts_with_the_persisted_plans_then_adopts_the_choice()
 
 
 def test_the_result_keeps_the_specialist_shape_expected_by_the_graph():
-    """aggregator / suitability_guard 不该需要知道这个分支存在。"""
+    """compliance_node / suitability_guard 不该需要知道这个分支存在。"""
     service = _FakeService()
 
     result, _ = _run(service)

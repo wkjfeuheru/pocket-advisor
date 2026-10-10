@@ -55,8 +55,7 @@ STAGE_LABELS = {
     "portfolio_agent": "查询持仓",
     "chat_agent": "整理问答",
     "suitability_guard": "核对适配性",
-    "aggregator": "整理回答",
-    "output_guard": "校验回答",
+    "compliance_node": "生成合规回答",
 }
 
 
@@ -88,8 +87,8 @@ def parse_recommendations(text: str) -> list[str]:
 
 
 def public_token(message: Any, metadata: dict | None) -> str | None:
-    """只放行 aggregator 的增量文本。专家节点的 token 不进入用户流。"""
-    if (metadata or {}).get("langgraph_node") != "aggregator":
+    """只放行 compliance_node 的增量文本。专家节点的 token 不进入用户流。"""
+    if (metadata or {}).get("langgraph_node") != "compliance_node":
         return None
     content = getattr(message, "content", "")
     if isinstance(content, str):
@@ -221,7 +220,10 @@ def build_advisor_graph(
         if isinstance(confirmed, dict):
             profile.update({key: value for key, value in confirmed.items() if value not in (None, "")})
         still_missing = [field for field in missing if not profile.get(field)]
-        if still_missing:
+        # 仅当用户确实返回了结构化数据但仍有遗漏时才继续追问；
+        # 若用户返回的不是 dict（未提供有效填充），不再以相同 payload 二次挂起，
+        # 否则会形成"同一份缺失列表反复中断"的死循环。下游节点需容忍不完整画像。
+        if still_missing and isinstance(confirmed, dict):
             interrupt({"missing_fields": still_missing, "profile": profile})
         return {"profile_snapshot": profile}
 
@@ -344,7 +346,14 @@ def build_advisor_graph(
             lines.append("evidence: " + json.dumps(public, ensure_ascii=False, default=str))
         return "\n".join(lines)
 
-    async def aggregator(state: AdvisorState) -> dict:
+    async def compliance_node(state: AdvisorState) -> dict:
+        """合规生成节点：先汇总专业结果生成回答，再就地完成合规校验。
+
+        合并了原 ``aggregator``（生成）与 ``output_guard``（校验）：
+        生成后立即按适配性白名单过滤推荐、剔除交易性用语并补全免责声明；
+        若推荐清单越权且尚未重写过，则置 ``needs_rewrite`` 触发一次重写。
+        """
+        # ---- 生成：汇总专业结果 + 适配性白名单，交给模型产出回答草稿 ----
         suitability = state.get("suitability_result") or {}
         materials = []
         for result in state.get("agent_results") or []:
@@ -370,34 +379,33 @@ def build_advisor_graph(
             f"校验反馈：{feedback}",
         ])
         parts: list[str] = []
+        # 传入 get_config() 让 LangGraph 的 messages 流模式捕获增量 chunk，
+        # 经 public_token 过滤后对用户做 token 级流式输出。
+        config = get_config()
         async for chunk in model.astream([
             {"role": "system", "content": AGGREGATOR_SYSTEM_PROMPT},
             {"role": "user", "content": human},
-        ]):
+        ], config):
             text = chunk.content if isinstance(getattr(chunk, "content", None), str) else ""
             if text:
                 parts.append(text)
         answer = "".join(parts).strip()
-        return {
-            "final_result": answer,
-            "final_recommendations": parse_recommendations(answer),
-            "needs_rewrite": False,
-        }
 
-    def output_guard(state: AdvisorState) -> dict:
-        suitability = state.get("suitability_result") or {}
+        # ---- 合规校验：越权推荐触发一次重写，否则就地清理并定稿 ----
         allowed = set(suitability.get("allowed") or [])
         blocked = set(suitability.get("blocked") or [])
-        recommended = [str(code) for code in state.get("final_recommendations") or []]
+        recommended = parse_recommendations(answer)
         bad = [code for code in recommended if code in blocked or code not in allowed]
         count = int(state.get("rewrite_count") or 0)
         if bad and count < 1:
             return {
+                "final_result": answer,
+                "final_recommendations": recommended,
                 "needs_rewrite": True,
                 "rewrite_count": count + 1,
                 "guard_feedback": f"推荐清单包含不适配代码 {', '.join(bad)}，请去掉这些推荐。",
             }
-        text = state.get("final_result") or ""
+        text = answer
         recommendations = [code for code in recommended if code in allowed and code not in blocked]
         if bad:
             text = "当前没有与您风险等级匹配的推荐。更高风险的产品不会进入推荐集合。"
@@ -411,9 +419,9 @@ def build_advisor_graph(
             "final_recommendations": recommendations,
         }
 
-    def route_after_guard(state: AdvisorState) -> str:
+    def route_after_compliance(state: AdvisorState) -> str:
         if state.get("needs_rewrite"):
-            return "aggregator"
+            return "compliance_node"
         return END
 
     graph = StateGraph(AdvisorState)
@@ -434,15 +442,13 @@ def build_advisor_graph(
             graph.add_node(agent, _specialist_node(agent))
         graph.add_edge(agent, "suitability_guard")
     graph.add_node("suitability_guard", suitability_guard)
-    graph.add_node("aggregator", aggregator)
-    graph.add_node("output_guard", output_guard)
+    graph.add_node("compliance_node", compliance_node)
     graph.add_edge(START, "resolve_query")
     graph.add_edge("resolve_query", "classify_intent")
     graph.add_edge("classify_intent", "profile_gate")
     graph.add_edge("profile_gate", "dispatch_intents")
-    graph.add_edge("suitability_guard", "aggregator")
-    graph.add_edge("aggregator", "output_guard")
-    graph.add_conditional_edges("output_guard", route_after_guard, ["aggregator", END])
+    graph.add_edge("suitability_guard", "compliance_node")
+    graph.add_conditional_edges("compliance_node", route_after_compliance, ["compliance_node", END])
     return graph.compile(checkpointer=checkpointer)
 
 

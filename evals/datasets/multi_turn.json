@@ -1,0 +1,19 @@
+{
+  "cases": [
+    {"case_id": "r01", "messages": [{"role": "user", "content": "看看110011基金"}, {"role": "assistant", "content": "110011 是XX成长混合基金。"}, {"role": "user", "content": "那它最近表现怎么样？"}], "expect_contains": ["110011", "业绩"], "forbidden_anaphora": ["它"], "note": "单数指代-基金"},
+    {"case_id": "r02", "messages": [{"role": "user", "content": "分析一下贵州茅台"}, {"role": "assistant", "content": "贵州茅台是高端白酒龙头。"}, {"role": "user", "content": "它的股价呢？"}], "expect_contains": ["贵州茅台", "股价"], "forbidden_anaphora": ["它"], "note": "单数指代-股票"},
+    {"case_id": "r03", "messages": [{"role": "user", "content": "对比一下110011和110022"}, {"role": "assistant", "content": "两只基金各有侧重。"}, {"role": "user", "content": "它们最近谁的收益更高？"}], "expect_contains": ["110011", "110022"], "forbidden_anaphora": ["它们"], "note": "复数指代"},
+    {"case_id": "r04", "messages": [{"role": "user", "content": "看看沪深300今天的表现"}, {"role": "assistant", "content": "沪深300上涨0.5%。"}, {"role": "user", "content": "那只指数的市盈率是多少？"}], "expect_contains": ["沪深300", "市盈率"], "forbidden_anaphora": ["那只"], "note": "指示短语指代-指数"},
+    {"case_id": "r05", "messages": [{"role": "user", "content": "帮我看看我的持仓"}, {"role": "assistant", "content": "您的持仓以债券基金为主。"}, {"role": "user", "content": "那里面风险最高的是哪只？"}], "expect_contains": ["持仓"], "forbidden_anaphora": ["那里面"], "note": "省略主语-我的持仓"},
+    {"case_id": "r06", "messages": [{"role": "user", "content": "看看上证指数"}, {"role": "assistant", "content": "上证指数收涨0.8%。"}, {"role": "user", "content": "再看看深证成指"}], "expect_contains": ["深证成指"], "forbidden_anaphora": [], "note": "新话题无需依赖上文，但仍是第二轮"},
+    {"case_id": "r07", "messages": [{"role": "user", "content": "看看贵州茅台的行情"}, {"role": "assistant", "content": "茅台今日上涨。"}, {"role": "user", "content": "帮我把这只股票加入自选，再看看它的市盈率"}], "expect_contains": ["贵州茅台", "市盈率"], "forbidden_anaphora": ["这只", "它"], "note": "一条消息两个指代"},
+    {"case_id": "r08", "messages": [{"role": "user", "content": "看看五粮液"}, {"role": "assistant", "content": "五粮液今日下跌1%。"}, {"role": "user", "content": "和茅台比呢？"}], "expect_contains": ["五粮液", "茅台"], "forbidden_anaphora": [], "note": "省略式对比，需补全对象"},
+    {"case_id": "r09", "messages": [{"role": "user", "content": "看看110011基金的持仓"}, {"role": "assistant", "content": "110011 重仓消费股。"}, {"role": "user", "content": "这些重仓股最近表现怎么样？"}], "expect_contains": ["110011", "重仓"], "forbidden_anaphora": ["这些"], "note": "集合指代"},
+    {"case_id": "r10", "messages": [{"role": "user", "content": "查一下000858的行情"}, {"role": "assistant", "content": "000858 是五粮液。"}, {"role": "user", "content": "帮我分析一下它的基本面和资金面"}], "expect_contains": ["000858", "基本面", "资金面"], "forbidden_anaphora": ["它"], "note": "指代+并列任务补全"},
+    {"case_id": "k01", "messages": [{"role": "user", "content": "什么是市盈率？"}], "expect_contains": [], "forbidden_anaphora": [], "expect_rewrite": false, "note": "首轮不触发改写"},
+    {"case_id": "k02", "messages": [{"role": "user", "content": "今天天气怎么样？"}, {"role": "assistant", "content": "我无法查询天气。"}, {"role": "user", "content": "明天上证指数会涨吗？"}], "expect_contains": ["上证指数"], "forbidden_anaphora": [], "expect_rewrite": false, "note": "新话题完整，应原样放行"},
+    {"case_id": "k03", "messages": [{"role": "user", "content": "看看大盘"}, {"role": "assistant", "content": "大盘上涨。"}, {"role": "user", "content": "详细说说科技板块的情况，包括半导体和软件两个子行业的资金流向"}], "expect_contains": ["科技板块", "半导体", "软件"], "forbidden_anaphora": [], "note": "长句自包含，改写应保留全部实体"},
+    {"case_id": "k04", "messages": [{"role": "user", "content": "帮我看看我的持仓收益"}, {"role": "assistant", "content": "您的持仓整体盈利2%。"}, {"role": "user", "content": "那只亏损最多的基金最近为什么不涨？"}], "expect_contains": ["持仓", "基金"], "forbidden_anaphora": ["那只"], "note": "指代+因果问题"},
+    {"case_id": "k05", "messages": [{"role": "user", "content": "看看黄金ETF"}, {"role": "assistant", "content": "黄金ETF近期波动加大。"}, {"role": "user", "content": "和原油比呢？"}], "expect_contains": ["黄金ETF", "原油"], "forbidden_anaphora": [], "note": "商品对比省略句"}
+  ]
+}

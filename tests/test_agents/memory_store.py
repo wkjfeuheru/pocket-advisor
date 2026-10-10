@@ -186,6 +186,26 @@ class MemoryAdvisorStore:
         self.profiles[customer_id.upper()] = current
         return dict(current)
 
+    def complete_turn(self, request_id: str, **fields: Any) -> bool:
+        turn = self.turns.get(request_id)
+        if turn is None or turn["status"] not in {"pending", "running"}:
+            return False
+        turn.update({"status": "completed", "stage": "完成", "retryable": False, "error_code": ""})
+        turn.update(fields)
+        turn["updated_at"] = _now().isoformat()
+        return True
+
+    def fail_active_turn(self, request_id: str, *, code: str, retryable: bool) -> bool:
+        turn = self.turns.get(request_id)
+        if turn is None or turn["status"] not in {"pending", "running"}:
+            return False
+        turn["status"] = "failed"
+        turn["stage"] = "失败"
+        turn["error_code"] = code
+        turn["retryable"] = retryable
+        turn["updated_at"] = _now().isoformat()
+        return True
+
     def mark_stale_running(self, timeout_seconds: int) -> int:
         cutoff = (_now() - timedelta(seconds=timeout_seconds)).isoformat()
         count = 0

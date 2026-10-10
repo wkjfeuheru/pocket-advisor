@@ -130,10 +130,11 @@ class _FakeLedgerStore:
         return None
 
     def mark_plan_adopted(self, plan_id, *, adopted_at):
-        self.plans.setdefault(plan_id, {})
-        self.plans[plan_id].update(
-            {"plan_id": plan_id, "status": "adopted", "adopted_at": adopted_at}
-        )
+        row = self.plans.setdefault(plan_id, {})
+        if row.get("status") == "adopted" and row.get("adopted_at"):
+            return False
+        row.update({"plan_id": plan_id, "status": "adopted", "adopted_at": adopted_at})
+        return True
 
     def get_plan(self, plan_id):
         row = self.plans.get(plan_id)
@@ -311,6 +312,19 @@ def test_the_account_is_not_reestablished_on_a_second_distinct_plan(ledger, ledg
     assert account["total_units"] == account_after_first["total_units"]
     # 第二笔采纳新增了成交
     assert len(ledger_store.trades) > 2
+
+
+def test_same_request_id_replays_instead_of_trading_twice(ledger, ledger_store):
+    """带 request_id 的重试必须命中成交级重放：不报 already_adopted，也不重复下单。"""
+    reader = _FakePlanReader({"p-1": _plan("p-1", WEIGHTS)})
+
+    first = _adopt(ledger, ledger_store, reader, request_id="req-1")
+    trades_after_first = len(ledger_store.trades)
+
+    second = _adopt(ledger, ledger_store, reader, request_id="req-1")
+
+    assert len(ledger_store.trades) == trades_after_first
+    assert second.unit_nav == pytest.approx(first.unit_nav)
 
 
 def test_a_plan_with_no_usable_nav_is_reported(ledger, ledger_store):

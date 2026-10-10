@@ -101,13 +101,13 @@ def test_public_artifact_projection_is_idempotent():
 
 
 class _DualScriptedModel:
-    """同一个模型对象同时服务意图分类和 aggregator。"""
+    """同一个模型对象同时服务意图分类和 compliance_node。"""
 
     def __init__(self, intent, classification, answer: str = "指数偏强，请结合自身情况判断。") -> None:
         self.intent = intent
         self.classification = classification
         self.answer = answer
-        self.aggregator_inputs: list = []
+        self.compliance_inputs: list = []
 
     def with_structured_output(self, schema, *, method=None, **kwargs):  # noqa: ANN001
         parent = self
@@ -121,12 +121,12 @@ class _DualScriptedModel:
         return _Structured()
 
     async def astream(self, messages, config=None):  # noqa: ANN001
-        self.aggregator_inputs.append(messages)
+        self.compliance_inputs.append(messages)
         yield SimpleNamespace(content=self.answer)
 
 
 def test_real_stock_react_agent_inside_the_real_advisor_graph():
-    """主图集成：ReAct Agent 的证据句柄由服务端组装后进入 aggregator。"""
+    """主图集成：ReAct Agent 的证据句柄由服务端组装后进入 compliance_node。"""
     from app.agents.builders import build_specialists
     from app.agents.graphs.state import Intent, IntentResult
     from app.agents.graphs.task_agent import build_advisor_graph
@@ -207,7 +207,7 @@ def test_real_stock_react_agent_inside_the_real_advisor_graph():
     assert "kline" not in artifact["market_overview"]
 
     human = next(
-        message["content"] for message in model.aggregator_inputs[-1] if message["role"] == "user"
+        message["content"] for message in model.compliance_inputs[-1] if message["role"] == "user"
     )
     assert "上证综指" in human
     assert "stock-public-v1" in human

@@ -1,0 +1,22 @@
+{
+  "cases": [
+    {"case_id": "sc01", "message": "今天大盘走势如何？", "expect_scenario": "market_overview", "note": "显式大盘"},
+    {"case_id": "sc02", "message": "分析一下贵州茅台的基本面", "expect_scenario": "equity_research", "expect_symbols_contains": ["贵州茅台"], "note": "显式个股"},
+    {"case_id": "sc03", "message": "帮我选几只消费行业的股票", "expect_scenario": "stock_screening", "expect_industries_contains": ["消费"], "note": "行业筛选"},
+    {"case_id": "sc04", "message": "最近市场情绪怎么样？涨跌家数比例如何？", "expect_scenario": "market_overview", "note": "情绪+广度"},
+    {"case_id": "sc05", "message": "600519最近的技术面怎么样？", "expect_scenario": "equity_research", "expect_symbols_contains": ["600519"], "note": "代码个股+技术面"},
+    {"case_id": "sc06", "message": "按价值风格选股，中期持有，只要白酒行业", "expect_scenario": "stock_screening", "expect_strategy": "value_quality", "expect_horizon": "medium", "note": "策略+期限+行业齐全"},
+    {"case_id": "sc07", "message": "帮我看看上证指数和深证成指今天的行情", "expect_scenario": "market_overview", "note": "双指数行情"},
+    {"case_id": "sc08", "message": "对比一下茅台和五粮液谁更有投资价值", "expect_scenario": "equity_research", "expect_symbols_contains": ["茅台", "五粮液"], "note": "双标的对比"},
+    {"case_id": "sc09", "message": "在沪深300成分股里按成长风格帮我选股，准备长期持有", "expect_scenario": "stock_screening", "expect_strategy": "growth_quality", "expect_horizon": "long", "expect_index_scope_contains": ["沪深300"], "note": "指数范围+成长+长期"},
+    {"case_id": "sc10", "message": "看看今天哪个板块领涨？", "expect_scenario": "market_overview", "note": "板块轮动属大盘"},
+    {"case_id": "sc11", "message": "五粮液最近的资金流向怎么样？", "expect_scenario": "equity_research", "expect_symbols_contains": ["五粮液"], "note": "单标的消息面"},
+    {"case_id": "sc12", "message": "帮我挑3只低估值的银行股", "expect_scenario": "stock_screening", "expect_candidate_count": 3, "note": "数量+行业+低估值"},
+    {"case_id": "sc13", "message": "结合我的风险等级，在沪深300里帮我选股，短线波段", "expect_scenario": "stock_screening", "expect_filter_by_profile": true, "expect_horizon": "short", "note": "明确「结合我的风险」→filter_by_profile"},
+    {"case_id": "sc14", "message": "分析一下宁德时代的基本面和消息面", "expect_scenario": "equity_research", "expect_symbols_contains": ["宁德时代"], "note": "个股多维度"},
+    {"case_id": "sc15", "message": "科技成长风格的股票有哪些可以关注的？", "expect_scenario": "stock_screening", "expect_strategy": "growth_quality", "note": "风格+行业筛选"},
+    {"case_id": "sc16", "message": "帮我看看创业板指数的情况", "expect_scenario": "market_overview", "note": "指数行情而非成分筛选"},
+    {"case_id": "sc17", "message": "帮我选股，要求波动小、分红稳定，准备养老长期持有", "expect_scenario": "stock_screening", "expect_strategy": "value_quality", "expect_horizon": "long", "note": "描述性策略映射"},
+    {"case_id": "sc18", "message": "同花顺000858今天的成交量怎么样？", "expect_scenario": "equity_research", "expect_symbols_contains": ["000858"], "note": "前缀词「同花顺」不改变个股意图"}
+  ]
+}

@@ -40,6 +40,30 @@ class RacingRetryStore(MemoryAdvisorStore):
         return turn
 
 
+class RacingDuplicateStore(MemoryAdvisorStore):
+    """模拟并发同 request_id：预检查漏过，落库时才撞唯一约束。"""
+
+    def __init__(self, request_id: str) -> None:
+        super().__init__()
+        self._race_request_id = request_id
+        self._find_calls = 0
+
+    def find_turn(self, request_id: str):
+        if request_id == self._race_request_id:
+            self._find_calls += 1
+            if self._find_calls <= 2:
+                # 前两次是 prepare_chat 的预检查：假装还没看到已落库的轮次。
+                return None
+        return super().find_turn(request_id)
+
+    def insert_message(self, session_id, request_id, role, content, metadata=None):
+        if request_id == self._race_request_id:
+            from app.core.security import UniqueConstraintError
+
+            raise UniqueConstraintError("同一轮同一角色不能重复写入")
+        return super().insert_message(session_id, request_id, role, content, metadata)
+
+
 class FakeSaver:
     def __init__(self) -> None:
         self.deleted: list[str] = []
@@ -61,10 +85,12 @@ class FakeGraph:
         assert config["configurable"]["thread_id"]
         self.inputs.append(graph_input)
         yield ("updates", {"classify_intent": {}})
-        yield ("messages", (SimpleNamespace(content="汇总"), {"langgraph_node": "aggregator"}))
+        yield ("messages", (SimpleNamespace(content=self.answer), {"langgraph_node": "compliance_node"}))
         yield ("messages", (SimpleNamespace(content="EXPERT_SECRET"), {"langgraph_node": "stock_agent"}))
         if self.mode == "interrupt":
             return
+        if self.mode == "cancel":
+            raise asyncio.CancelledError()
         if self.mode == "fail":
             from app.agents.graphs.task_agent import AllBranchesFailed
 
@@ -129,6 +155,54 @@ def test_first_turn_creates_one_user_message_and_filters_expert_tokens():
     assert len(sessions[0]["title"]) <= 40
     assert [item["role"] for item in messages] == ["user", "assistant"]
     assert len(graph.inputs) == 1
+
+
+def test_classify_failure_distinguishes_deterministic_from_retryable():
+    """确定性错误不可重试，瞬时故障才可重试。"""
+    from app.services.agent_service import _classify_failure
+    from app.agents.graphs.task_agent import AllBranchesFailed
+
+    assert _classify_failure(ValueError("bad input")) == ("invalid_input", False)
+    assert _classify_failure(KeyError("missing")) == ("not_found", False)
+    assert _classify_failure(TypeError("oops")) == ("internal_error", False)
+    assert _classify_failure(TimeoutError("slow")) == ("timeout", True)
+    assert _classify_failure(ConnectionError("down")) == ("connection_error", True)
+    assert _classify_failure(AllBranchesFailed("all")) == ("all_branches_failed", True)
+    assert _classify_failure(RuntimeError("unknown"))[1] is True
+
+
+def test_deterministic_failure_marks_turn_not_retryable():
+    """ValueError 等确定性错误应标记 retryable=False，避免用户无效重试。"""
+    service, graph, _saver = _service()
+    graph.mode = "fail"
+
+    async def raise_value_error(*_a, **_k):
+        # 必须是 async generator，否则 async for 会拿到 coroutine 对象并抛 TypeError。
+        if False:  # 让函数成为 async generator
+            yield
+        raise ValueError("invalid_clarification_fields")
+
+    graph.astream = raise_value_error
+    request_id = "23232323-2323-2323-2323-232323232323"
+
+    events = _events(service, request_id=request_id, session_id=None, message="触发确定性错误")
+    assert events[-1]["event"] == "error"
+    assert events[-1]["data"]["retryable"] is False
+    with service.store.transaction():
+        turn = service.store.find_turn(request_id)
+    assert turn["retryable"] is False
+    assert turn["error_code"] == "invalid_input"
+
+
+def test_compliance_tokens_are_streamed_incrementally():
+    """合规节点的增量文本以 token 事件下发，专家节点 token 被过滤。"""
+    service, graph, _saver = _service()
+    graph.answer = "最终答案"
+    events = _events(service, request_id="24242424-2424-2424-2424-242424242424", session_id=None, message="流式")
+    tokens = [e for e in events if e["event"] == "token"]
+    assert tokens
+    assert all(t["data"]["text"] != "EXPERT_SECRET" for t in tokens)
+    assert "".join(t["data"]["text"] for t in tokens) == "最终答案"
 
 
 def test_only_guard_approved_final_answer_is_streamed_as_tokens():
@@ -497,7 +571,8 @@ def test_artifact_event_is_emitted_before_token_and_restored_in_metadata():
     )
     names = [event["event"] for event in events]
     assert "artifact" in names
-    assert names.index("artifact") < names.index("token")
+    # 合规答案可能以流式 token 在产物之前下发，因此只断言产物在 done 之前。
+    assert names.index("artifact") < names.index("done")
     artifact = next(event["data"] for event in events if event["event"] == "artifact")
     assert artifact["scenario"] == "market_overview"
     assert "tool_args" not in artifact
@@ -511,6 +586,102 @@ def test_artifact_event_is_emitted_before_token_and_restored_in_metadata():
     assert metadata["candidate_stocks"][0]["thscode"] == "600519.SH"
     assert "warnings" in metadata
     assert "tool_args" not in str(metadata)
+
+
+def test_graph_input_reuses_stored_message_ids_for_dedup():
+    """注入历史必须带落库 id，否则同一 checkpoint 每轮都会重复追加一遍历史。"""
+    service, _graph, _saver = _service()
+    prepared = service.prepare_chat(
+        "CUST000001",
+        request_id="18181818-1818-1818-1818-181818181818",
+        session_id=None,
+        message="第一问",
+    )
+    graph_input = service._graph_input("CUST000001", prepared)
+    with service.store.transaction():
+        stored = service.store.list_messages("CUST000001", prepared.session_id)
+
+    assert [item["id"] for item in graph_input["messages"]] == [item["id"] for item in stored]
+    # 重复注入同一批历史时 id 稳定，add_messages 才能按 id 去重。
+    assert service._graph_input("CUST000001", prepared)["messages"] == graph_input["messages"]
+
+
+def test_client_disconnect_marks_running_turn_retryable():
+    """客户端断流时不得让轮次停在 running，否则会话被锁死且无法重试。"""
+    service, graph, _saver = _service()
+    graph.mode = "cancel"
+    request_id = "19191919-1919-1919-1919-191919191919"
+    prepared = service.prepare_chat(
+        "CUST000001", request_id=request_id, session_id=None, message="中途断流"
+    )
+
+    async def collect():
+        with pytest.raises(asyncio.CancelledError):
+            async for _event in service.play("CUST000001", prepared):
+                pass
+
+    asyncio.run(collect())
+    turn = service.get_run("CUST000001", request_id)
+    assert turn["status"] == "failed"
+    assert turn["retryable"] is True
+    assert turn["error_code"] == "client_disconnected"
+
+
+def test_persist_failure_yields_error_event_and_marks_turn_failed(monkeypatch):
+    """落库异常必须转成 error 事件并把轮次标记失败，而不是截断 SSE 留在 running。"""
+    service, _graph, _saver = _service()
+    request_id = "20202020-2020-2020-2020-202020202020"
+
+    def boom(*_args, **_kwargs):
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr(service, "_persist_completion", boom)
+
+    events = _events(service, request_id=request_id, session_id=None, message="落库失败")
+    assert events[-1]["event"] == "error"
+    assert events[-1]["data"]["code"] == "turn_failed"
+    turn = service.get_run("CUST000001", request_id)
+    assert turn["status"] == "failed"
+    assert turn["retryable"] is True
+
+
+def test_duplicate_request_race_replays_instead_of_reporting_busy():
+    """并发同 request_id 撞唯一约束时，应按幂等重放处理，而不是报会话繁忙。"""
+    request_id = "21212121-2121-2121-2121-212121212121"
+    store = RacingDuplicateStore(request_id)
+    with store.transaction():
+        session = store.insert_session("CUST000001", "已有轮次")
+        store.insert_turn(session["id"], request_id, "completed")
+    runtime = AgentRuntime(status="ready", graph=FakeGraph(), library=object(), portfolio=object())
+    service = AgentService(store=store, runtime_getter=lambda: runtime)
+
+    prepared = service.prepare_chat(
+        "CUST000001", request_id=request_id, session_id=None, message="重复提交"
+    )
+
+    assert prepared.mode == "replay"
+    assert prepared.request_id == request_id
+
+
+def test_completion_is_skipped_when_turn_is_already_terminal():
+    """轮次已被并发标记终态时，完成写回不得覆盖状态，也不得落孤立助手消息。"""
+    service, _graph, _saver = _service()
+    request_id = "22222222-2222-2222-2222-222222222223"
+    prepared = service.prepare_chat(
+        "CUST000001", request_id=request_id, session_id=None, message="落库竞态"
+    )
+    with service.store.transaction():
+        service.store.update_turn(
+            request_id, status="failed", retryable=True, error_code="turn_failed"
+        )
+
+    assert service._persist_completion(prepared, "迟到的答案", []) is False
+
+    with service.store.transaction():
+        turn = service.store.find_turn(request_id)
+        messages = service.store.list_messages("CUST000001", prepared.session_id)
+    assert turn["status"] == "failed"
+    assert [item["role"] for item in messages] == ["user"]
 
 
 async def _collect(service: AgentService, prepared):

@@ -94,22 +94,25 @@ def adopt_selected_plan(
     initial_capital: float,
     fee_buy: float = 0.0015,
     fee_sell: float = 0.005,
+    request_id: str | None = None,
 ) -> AdoptionOutcome:
     """采纳用户在中断里选定的方案。
 
     ``current_holdings`` 是用户当前持仓（``market_value`` / ``shares`` / ``priceable``），
     用于两件事：首次采纳时镜像建仓，以及计算差额成交。
+
+    ``request_id`` 作为成交级幂等键：同一轮次重试时命中同一批 ``trade_key``，
+    走重放而不是重复下单；换方案再采则是新键，仍会被 ``already_adopted`` 拦住。
     """
     # 1) resume 只能是载荷里声明的、且可用的 plan_id。
     chosen = validate_allocation_resume(payload, resume_value)
     plan_id = chosen["plan_id"]
 
-    # 2) 读方案并确认它确实存在、还没被采纳过。
+    # 2) 读方案，确认它确实存在。是否已被采纳、是否可重放由 LedgerService 统一裁定：
+    #    带 request_id 的重试要先命中成交级重放，再由方案状态兜底，顺序在这里判会误伤重试。
     plan = plans.get_plan(plan_id)
     if plan is None:
         raise AdoptError(f"方案不存在: {plan_id}", code="plan_not_found")
-    if plan.get("status") == "adopted" and plan.get("adopted_at"):
-        raise AdoptError(f"方案已被采纳: {plan_id}", code="already_adopted")
 
     weights = _plan_weights(plan)
     tier = PlanTier(str(plan.get("tier") or "moderate"))
@@ -140,6 +143,7 @@ def adopt_selected_plan(
             nav_as_of=nav_as_of,
             fee_buy=fee_buy,
             fee_sell=fee_sell,
+            idempotency_key=(request_id or "").strip(),
         )
     except LedgerError as exc:
         raise AdoptError(str(exc), code=exc.code) from exc
