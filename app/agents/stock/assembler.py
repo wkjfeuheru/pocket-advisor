@@ -6,6 +6,7 @@ from collections import defaultdict
 import re
 from typing import Any
 
+from app.agents.graphs.results import StockWorkerResult
 from app.agents.stock.contracts import StockAgentResponse, StockRequest, StockResultV1
 from app.agents.stock.evidence_store import EvidenceAccessError
 from app.agents.stock.render import render_stock_result
@@ -24,14 +25,12 @@ def _symbol(payload: dict[str, Any]) -> str:
     return str(payload.get("thscode") or payload.get("ts_code") or payload.get("symbol") or "")
 
 
-def _generic_failure(response: StockAgentResponse, warning: str) -> dict[str, Any]:
-    return {
-        "agent": "stock_agent",
-        "content": "缺少可验证的实时证据，仅能提供通用定性说明。",
-        "recommended_product_codes": [], "candidate_stocks": [], "artifacts": [],
-        "warnings": list(dict.fromkeys([*response.warnings, warning])),
-        "source": "", "as_of": "", "failed": False,
-    }
+def _generic_failure(response: StockAgentResponse, warning: str) -> StockWorkerResult:
+    return StockWorkerResult(
+        status="degraded",
+        summary="缺少可验证的实时证据，仅能提供通用定性说明。",
+        warnings=list(dict.fromkeys([*response.warnings, warning])),
+    )
 
 
 def _numbers(value: Any) -> set[str]:
@@ -62,7 +61,7 @@ def _guard_summary(summary: str, evidence_rows: list[dict[str, Any]]) -> tuple[s
     return summary, False
 
 
-def assemble_stock_result(response: StockAgentResponse | dict[str, Any], context: Any, store: Any) -> dict[str, Any]:
+def assemble_stock_result(response: StockAgentResponse | dict[str, Any], context: Any, store: Any) -> StockWorkerResult:
     parsed = response if isinstance(response, StockAgentResponse) else StockAgentResponse.model_validate(response)
     rows = []
     try:

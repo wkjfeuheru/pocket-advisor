@@ -7,7 +7,7 @@ from typing import Any
 from langchain.agents import create_agent
 from langgraph.config import get_config
 
-from app.agents.graphs.state import empty_result
+from app.agents.graphs.results import RESULT_TYPES, StockWorkerResult, failed_result
 from app.agents.stock.assembler import assemble_stock_result
 from app.agents.stock.contracts import StockAgentResponse
 from app.agents.stock.evidence_store import EvidenceContext
@@ -52,54 +52,33 @@ def _content_of(result: Any) -> str:
 
 
 def _runner(agent: Any, name: str, source: str, warning: str):
-    async def run(task: str, _state: dict) -> dict:
+    result_type = RESULT_TYPES[name]
+
+    async def run(task: str, _state: dict) -> Any:
         if agent is None:
-            return {
-                "agent": name,
-                "content": warning,
-                "recommended_product_codes": [],
-                "candidate_stocks": [],
-                "artifacts": [],
-                "warnings": [warning],
-                "source": source,
-                "as_of": "",
-                "failed": False,
-            }
+            return failed_result(name, warning, status="degraded", source=source)
         result = await agent.ainvoke(
             {"messages": [{"role": "user", "content": task}]},
             get_config(),
         )
         content = _content_of(result)
-        return {
-            "agent": name,
-            "content": content,
-            "recommended_product_codes": parse_recommendations(content),
-            "candidate_stocks": [],
-            "artifacts": [],
-            "warnings": [],
-            "source": source,
-            "as_of": "",
-            "failed": False,
-        }
+        fields: dict[str, Any] = {"summary": content, "source": source}
+        if "recommended_product_codes" in result_type.model_fields:
+            fields["recommended_product_codes"] = parse_recommendations(content)
+        return result_type(**fields)
 
     return run
 
 
 def stock_agent_runner(stock_agent: Any, evidence_store: Any, *, warning: str = ""):
-    def degraded(message: str) -> dict:
-        return {
-            "agent": "stock_agent",
-            "content": "股票实时证据暂不可用，仅能提供通用定性说明。",
-            "recommended_product_codes": [],
-            "candidate_stocks": [],
-            "artifacts": [],
-            "warnings": [message],
-            "source": "",
-            "as_of": "",
-            "failed": False,
-        }
+    def degraded(message: str) -> StockWorkerResult:
+        return StockWorkerResult(
+            status="degraded",
+            summary="股票实时证据暂不可用，仅能提供通用定性说明。",
+            warnings=[message],
+        )
 
-    async def run(task: str, state: dict) -> dict:
+    async def run(task: str, state: dict) -> StockWorkerResult:
         if stock_agent is None or evidence_store is None:
             return degraded(warning or "stock_agent_unavailable")
         import asyncio
@@ -110,7 +89,7 @@ def stock_agent_runner(stock_agent: Any, evidence_store: Any, *, warning: str = 
         session_id = str(configurable.get("thread_id") or "")
         customer_id = str(configurable.get("customer_id") or "")
         if not request_id or not session_id or not customer_id:
-            return empty_result("stock_agent", "股票证据上下文缺失", source="fuyao")
+            return failed_result("stock_agent", "股票证据上下文缺失", source="fuyao")
         context = EvidenceContext(request_id=request_id, session_id=session_id, customer_id=customer_id)
         token = bind_stock_execution(context, profile=state.get("profile_snapshot") or {})
         try:

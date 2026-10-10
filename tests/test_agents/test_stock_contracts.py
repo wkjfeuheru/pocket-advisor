@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
-from app.agents.graphs.state import empty_result
+from app.agents.graphs.results import failed_result
 
 
 def test_stock_request_accepts_three_scenarios_and_defaults():
@@ -64,12 +64,12 @@ def test_stock_result_v1_has_public_fields_and_one_scenario_block():
     assert dumped["stock_screening"] is None
 
 
-def test_empty_result_separates_stock_candidates_from_product_codes():
-    payload = empty_result("stock_agent", "行情暂不可用", source="fuyao")
-    assert payload["recommended_product_codes"] == []
-    assert payload["candidate_stocks"] == []
-    assert payload["artifacts"] == []
-    assert payload["failed"] is True
+def test_stock_failed_result_has_candidates_but_no_product_codes():
+    payload = failed_result("stock_agent", "行情暂不可用", source="fuyao")
+    assert "recommended_product_codes" not in type(payload).model_fields
+    assert payload.candidate_stocks == []
+    assert payload.artifacts == []
+    assert payload.failed is True
 
 
 def test_stock_agent_response_forbids_unknown_fields():

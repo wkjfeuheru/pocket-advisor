@@ -75,14 +75,14 @@ def test_render_strips_trade_orders_and_keeps_disclaimer():
         equity_research=[{"thscode": "600519.SH", "name": "贵州茅台", "failed": False}],
     )
     rendered = render_stock_result(result, StockRequest(scenario="equity_research", symbols=["600519.SH"]))
-    text = rendered["content"]
+    text = rendered.summary
     assert SIMULATED_DISCLAIMER in text
     for token in ("买入", "卖出", "加仓", "减仓", "目标价", "仓位 20%"):
         assert token not in text
     assert "历史涨跌幅" in text
-    assert rendered["artifacts"]
-    assert "kline" not in str(rendered["artifacts"]).lower()
-    assert rendered["recommended_product_codes"] == []
+    assert rendered.artifacts
+    assert "kline" not in str(rendered.artifacts).lower()
+    assert "recommended_product_codes" not in type(rendered).model_fields
 
 
 def test_public_artifact_drops_nested_unsourced_and_unknown_fields():

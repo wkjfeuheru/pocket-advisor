@@ -66,24 +66,43 @@ def fake_specialist(name: str, *, content: str = "", codes: list[str] | None = N
                     error: Exception | None = None, warning: str = "",
                     failed: bool = False, candidates: list[dict] | None = None,
                     artifacts: list[dict] | None = None, delay: float = 0.0):
-    async def run(task: str, state: dict) -> dict:
+    async def run(task: str, state: dict) -> Any:
         if delay:
             await asyncio.sleep(delay)
         if error is not None:
             raise error
-        return {
-            "agent": name,
-            "content": content or f"{name}:{task}",
-            "recommended_product_codes": list(codes or []),
-            "candidate_stocks": list(candidates or []),
-            "artifacts": list(artifacts or []),
-            "warnings": [warning] if warning else [],
-            "source": "fake",
-            "as_of": "2026-09-28T00:00:00Z",
-            "failed": failed,
-        }
+        return fake_result(
+            name,
+            content=content or f"{name}:{task}",
+            codes=codes,
+            warning=warning,
+            failed=failed,
+            candidates=candidates,
+            artifacts=artifacts,
+        )
 
     return run
+
+
+def fake_result(name: str, *, content: str = "", codes: list[str] | None = None,
+                warning: str = "", failed: bool = False,
+                candidates: list[dict] | None = None,
+                artifacts: list[dict] | None = None) -> Any:
+    """按 worker 类型构造结果；该 worker 没有的字段（如 chat 的推荐代码）直接丢弃。"""
+    from app.agents.graphs.results import RESULT_TYPES
+
+    result_type = RESULT_TYPES[name]
+    fields: dict[str, Any] = {
+        "status": "failed" if failed else "ok",
+        "summary": content,
+        "warnings": [warning] if warning else [],
+        "source": "fake",
+        "as_of": "2026-09-28T00:00:00Z",
+        "recommended_product_codes": list(codes or []),
+        "candidate_stocks": list(candidates or []),
+        "artifacts": list(artifacts or []),
+    }
+    return result_type(**{key: value for key, value in fields.items() if key in result_type.model_fields})
 
 
 def full_specialists(**overrides: Any) -> dict:

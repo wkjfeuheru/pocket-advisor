@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 from langgraph.checkpoint.memory import MemorySaver
 
+from app.agents.graphs.results import worker_results
 from app.agents.stock.contracts import ScenarioClassification
 
 
@@ -29,7 +30,7 @@ def test_render_output_has_no_trade_instructions_and_keeps_disclaimer():
         }],
     }
     rendered = render_stock_result(guarded, StockRequest(scenario="equity_research", symbols=["600519.SH"]))
-    content = rendered["content"]
+    content = rendered.summary
     for banned in ("买入", "卖出", "加仓", "减仓", "目标价", "仓位比例", "仓位 30%", "买卖点"):
         assert banned not in content, f"受控摘要仍包含 {banned}"
     assert SIMULATED_DISCLAIMER in content
@@ -197,7 +198,7 @@ def test_real_stock_react_agent_inside_the_real_advisor_graph():
     state = asyncio.run(run())
     values = state.values
 
-    artifacts = [item for result in values["agent_results"] for item in result.get("artifacts") or []]
+    artifacts = [item for result in worker_results(values) for item in result.artifacts]
     assert artifacts, "Stock Agent 没有产出 artifact"
     artifact = artifacts[0]
     assert artifact["scenario"] == "market_overview"
@@ -215,7 +216,7 @@ def test_real_stock_react_agent_inside_the_real_advisor_graph():
     assert "update_time" not in human
     assert "pct_chg" not in human
 
-    answer = values["final_result"]
+    answer = values["final"]["answer"]
     for token in ("买入", "卖出", "加仓", "减仓", "目标价", "买卖点", "仓位比例"):
         assert token not in answer, f"最终回答仍包含 {token}"
     assert SIMULATED_DISCLAIMER in answer

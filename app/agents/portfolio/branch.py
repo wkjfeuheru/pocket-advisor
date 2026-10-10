@@ -6,8 +6,7 @@
 - 与 LangGraph 的耦合只剩一个函数签名；
 - 挂起前先落库，因此 resume 时方案一定存在。
 
-返回值沿用既有 ``_specialist_node`` 期望的形状（``content`` / ``artifacts`` /
-``warnings`` / ``recommended_product_codes`` 等），照 ``empty_result`` 的字段补齐，
+返回 ``PortfolioWorkerResult``，与普通持仓分支同一类型，
 这样 compliance_node 与 suitability_guard 不需要知道这个分支的存在。
 """
 
@@ -15,6 +14,7 @@ from __future__ import annotations
 
 from typing import Any, Callable, Mapping
 
+from app.agents.graphs.results import PortfolioWorkerResult
 from app.agents.portfolio.contracts import (
     AllocationInterruptError,
     build_allocation_payload,
@@ -42,19 +42,14 @@ def _result(
     artifacts: list[dict[str, Any]] | None = None,
     warnings: list[str] | None = None,
     failed: bool = False,
-) -> dict[str, Any]:
-    """与 ``empty_result`` 同形状，字段不多不少。"""
-    return {
-        "agent": "portfolio_agent",
-        "content": content,
-        "recommended_product_codes": [],
-        "candidate_stocks": [],
-        "artifacts": list(artifacts or []),
-        "warnings": list(warnings or []),
-        "source": "postgresql",
-        "as_of": "",
-        "failed": failed,
-    }
+) -> PortfolioWorkerResult:
+    return PortfolioWorkerResult(
+        status="failed" if failed else "ok",
+        summary=content,
+        artifacts=list(artifacts or []),
+        warnings=list(warnings or []),
+        source="postgresql",
+    )
 
 
 def _summarize(service_payload: Mapping[str, Any]) -> str:
@@ -81,7 +76,7 @@ def run_allocation_task(
     interrupt: Callable[[Any], Any],
     request_id: str | None = None,
     session_id: str | None = None,
-) -> dict[str, Any]:
+) -> PortfolioWorkerResult:
     """跑一次配置建议：生成 → 挂起 → 校验选择 → 采纳。
 
     ``interrupt`` 是 LangGraph 的 ``interrupt``（或测试替身）。它在**方案已落库之后**

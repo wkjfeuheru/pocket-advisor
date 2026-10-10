@@ -321,18 +321,18 @@ def test_server_assembles_artifact_from_evidence_and_suppresses_unsupported_numb
         evidence_ids=[market["id"]], evidence_quality="ok", failed=False,
     )
     rendered = assemble_stock_result(response, _context(), store)
-    assert rendered["artifacts"][0]["market_overview"]["indices"][0]["last"] == 3200.0
-    assert "9999" not in rendered["content"]
+    assert rendered.artifacts[0]["market_overview"]["indices"][0]["last"] == 3200.0
+    assert "9999" not in rendered.summary
 
     unsupported = StockAgentResponse(
         scenario="market_overview", summary="上证指数 9999 点",
         evidence_ids=[], evidence_quality="ok", failed=False,
     )
     degraded = assemble_stock_result(unsupported, _context(), store)
-    assert degraded["artifacts"] == []
-    assert degraded["candidate_stocks"] == []
-    assert degraded["failed"] is False
-    assert "9999" not in degraded["content"]
+    assert degraded.artifacts == []
+    assert degraded.candidate_stocks == []
+    assert degraded.failed is False
+    assert "9999" not in degraded.summary
 
 
 @pytest.mark.parametrize(
@@ -374,10 +374,10 @@ def test_unusable_evidence_returns_a_nonfatal_generic_answer(scenario, evidence_
         failed=True,
     ), _context(), store)
 
-    assert result["failed"] is False
-    assert result["artifacts"] == []
-    assert result["candidate_stocks"] == []
-    assert "个股结论" not in result["content"]
+    assert result.failed is False
+    assert result.artifacts == []
+    assert result.candidate_stocks == []
+    assert "个股结论" not in result.summary
 
 
 def test_fundamental_tool_rejects_mixed_symbols():
