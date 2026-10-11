@@ -100,7 +100,7 @@ def test_ascii_digits_are_dropped_but_placeholder_values_survive():
 
 def test_unknown_placeholder_is_dropped_with_warning():
     text, warnings = _stream(["引用 {{unknown:9}} 无效。"])
-    assert text == "引用  无效。"
+    assert text == ""  # 未知引用的整句移除，不能留下缺少数值的残句。
     assert "stream_unknown_placeholder" in warnings
 
 

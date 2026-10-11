@@ -26,13 +26,15 @@ _ALIASES = {
     "change_pct": ("涨跌幅", "涨幅", "change_pct"), "roe": ("净资产收益率", "ROE", "roe"),
     "pe": ("市盈率", "PE", "pe"), "pb": ("市净率", "PB", "pb"),
     "rsi": ("RSI", "rsi"), "nav": ("净值", "nav"),
+    "turnover": ("成交额", "成交金额", "turnover"),
+    "report_period": ("报告期", "数据日期", "截止日期", "report_period"),
 }
 
 
 def numeric_claims(text: str, *, labels=()) -> list[str]:
     """列出未引用的业务数字；分析参数与展示编号不属于数值断言。"""
     plain = PLACEHOLDER.sub(lambda m: " " * len(m.group()), text)
-    for label in sorted(set(labels), key=len, reverse=True):
+    for label in sorted({label for label in labels if re.search(r"[\u4e00-\u9fff]", label)}, key=len, reverse=True):
         if label:
             plain = plain.replace(label, " " * len(label))
     plain = _PRESENTATION.sub(lambda m: " " * len(m.group()), plain)
@@ -111,6 +113,9 @@ class StreamingGuard:
         return "".join(pieces)
 
     def _sentence(self, text: str) -> str:
+        if re.search(r"\b(?:missing|invalid|unsupported|security|tool|market|evidence|stock|stream)_[a-z_]+\b", text):
+            self._note("stream_blocked_internal_code")
+            return ""
         if FORBIDDEN.search(text):
             self._note("stream_blocked_forbidden")
             return ""
@@ -124,7 +129,7 @@ class StreamingGuard:
             fact = self._facts.get(match.group(1))
             if fact is None:
                 self._note("stream_unknown_placeholder")
-                continue
+                return ""
             metric = _canonical_metric(str(fact.get("metric") or ""))
             declared = _canonical_metric(match.group(2) or "")
             inferred = _context_metric(text[:match.start()])

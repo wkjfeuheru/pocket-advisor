@@ -76,6 +76,23 @@ def test_recent_week_is_an_explicit_timeframe():
 
 
 @pytest.mark.asyncio
+async def test_followup_with_trend_suffix_keeps_confirmed_equity_context():
+    from app.agents.slots import extract_slots, SlotExtraction, SlotPatch
+    class Model:
+        def with_structured_output(self, *a, **kw): return self
+        async def ainvoke(self, inputs):
+            return SlotExtraction(continuation=True, patch=SlotPatch(set_values={"timeframe": "近一年"}))
+    result = await extract_slots(Model(), "stock_agent", "看近一年的走势。", [],
+        {"scenario": "equity_research", "symbols": ["600519.SH"]})
+    assert not result["missing"] and result["slots"]["symbols"] == ["600519.SH"]
+
+
+def test_financial_report_quarter_is_a_date():
+    result = normalize_payload("financials", {"data": {"report": "2026-2", "abilities": []}})
+    assert result["as_of"] == "2026-06-30"
+
+
+@pytest.mark.asyncio
 async def test_market_pipeline_retains_partial_data_and_uses_metadata_names():
     from types import SimpleNamespace
     from app.agents.stock.evidence_store import EvidenceContext, MemoryAgentEvidenceStore
@@ -99,6 +116,75 @@ async def test_market_pipeline_retains_partial_data_and_uses_metadata_names():
     assert not response.failed and payload["indices"][0]["name"] == "上证指数"
     assert payload["last_calendar_trade_date"] == "2026-10-09"
     assert len(calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_explicit_index_code_survives_model_name_and_scenario_drift():
+    from app.agents.slots import extract_slots, SlotExtraction, SlotPatch
+    class Model:
+        def with_structured_output(self, *a, **kw): return self
+        async def ainvoke(self, inputs):
+            return SlotExtraction(patch=SlotPatch(set_values={"scenario": "equity_research", "symbols": ["沪深300指数"]}))
+    result = await extract_slots(Model(), "stock_agent", "看看沪深300指数（000300.SH）最近行情", [], {},
+        source_query="看看沪深300指数（000300.SH）最近行情")
+    assert result["slots"]["scenario"] == "market_overview"
+    assert result["slots"]["symbols"] == ["000300.SH"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("history_code,expected", [("000300.SH", True), ("399006.SZ", False)])
+async def test_historical_only_result_is_independent_and_never_relabels_another_index(history_code, expected):
+    from types import SimpleNamespace
+    from app.agents.stock.market_fetch import collect_market_evidence
+    from app.agents.stock.evidence_store import EvidenceContext, MemoryAgentEvidenceStore
+    async def history(args):
+        return {"code": 0, "data": {"item": [{"thscode": history_code, "date": "2026-10-08", "close": 100},
+            {"thscode": history_code, "date": "2026-10-09", "close": 200}]}}
+    store = MemoryAgentEvidenceStore()
+    ctx = EvidenceContext("r", "s", "c")
+    response = await collect_market_evidence(store, ctx, [SimpleNamespace(name="fuyao_a_share_index_get_a_share_index_prices_historical", ainvoke=history)],
+        {"symbols": ["000300.SH"], "timeframe": {"start": "2026-10-01", "end": "2026-10-11"}})
+    payload = store.get(response.evidence_ids[0], ctx)["payload"]
+    assert bool(payload["historical_indices"]) == expected
+    assert response.failed is not expected
+
+
+@pytest.mark.asyncio
+async def test_auxiliary_runtime_error_does_not_destroy_valid_snapshot():
+    from types import SimpleNamespace
+    from app.agents.stock.market_fetch import collect_market_evidence
+    from app.agents.stock.evidence_store import EvidenceContext, MemoryAgentEvidenceStore
+    async def snapshot(args):
+        return {"data": [{"thscode": "000001.SH", "last": 3813.79, "as_of": "2026-10-09"}]}
+    async def calendar(args):
+        raise RuntimeError("upstream error")
+    store = MemoryAgentEvidenceStore()
+    ctx = EvidenceContext("r", "s", "c")
+    response = await collect_market_evidence(store, ctx, [SimpleNamespace(name="fuyao_a_share_index_get_a_share_index_prices_snapshot", ainvoke=snapshot),
+        SimpleNamespace(name="fuyao_a_share_get_a_share_calendar_trading_days", ainvoke=calendar)], {})
+    assert not response.failed
+
+
+def test_router_repairs_one_malformed_model_response():
+    import asyncio
+    from app.agents.graphs.state import Intent, ChatResult
+    from app.agents.graphs.task_agent import build_advisor_graph
+    from tests.test_agents.test_supervisor_v2 import Model
+    class RetryModel(Model):
+        repaired = False
+        def with_structured_output(self, schema, **kwargs):
+            if schema.__name__ == "IntentResult" and not self.repaired:
+                self.repaired = True
+                class Invalid:
+                    async def ainvoke(self, messages, config=None):
+                        return {"intents": [{"agent": "unknown", "task": "你好"}]}
+                return Invalid()
+            return super().with_structured_output(schema, **kwargs)
+    model = RetryModel([Intent(agent="chat_agent", task="你好")])
+    async def worker(task, state): return ChatResult(summary="你好")
+    result = asyncio.run(build_advisor_graph(model=model, specialists={"chat_agent": worker}).ainvoke(
+        {"messages": [{"role": "user", "content": "你好"}]}))
+    assert result["final"].answer and model.repaired
 
 
 def test_public_warnings_do_not_expose_internal_codes():

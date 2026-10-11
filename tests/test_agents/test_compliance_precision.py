@@ -67,6 +67,10 @@ def test_fact_subject_mismatch_is_blocked_and_verified_index_name_is_allowed():
     assert wrong == "" and "stream_fact_subject_mismatch" in warnings
     correct, warnings = sanitize_stream("沪深300点位 {{hs:0|last}}。", facts)
     assert correct == "沪深300点位 4317.25点。" and not warnings
+    text, warnings = sanitize_stream("报告期为 {{hs:0|last}}。", facts)
+    assert text == "" and "stream_fact_metric_mismatch" in warnings
+    text, warnings = sanitize_stream("利润600519元。", {"q": {"subject": "600519.SH", "subject_name": "600519", "metric": "last", "value": 1263}})
+    assert text == "" and warnings
 
 
 @pytest.mark.parametrize("text", [

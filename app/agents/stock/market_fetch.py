@@ -32,7 +32,10 @@ async def collect_market_evidence(store, context, tools, slots) -> StockAgentRes
             row = await asyncio.to_thread(store.get, preview["evidence_id"], context)
             rows.append(row)
             return row
-        except (TimeoutError, ConnectionError, ValueError):
+        except Exception as exc:
+            from app.agents.graphs.task_agent import is_degradable
+            if not is_degradable(exc):
+                raise
             return None
 
     quote_row, calendar_row = await asyncio.gather(fetch(snapshot, {"thscodes": ",".join(codes)}), fetch(calendar, {}))
@@ -77,7 +80,8 @@ async def collect_market_evidence(store, context, tools, slots) -> StockAgentRes
             entries = data(row)
             entries = entries if isinstance(entries, list) else []
             # 上游有时忽略请求区间；历史样本必须实际落在本次区间内才能计算。
-            valid = sorted([item for item in entries if isinstance(item, dict) and period["start"] <= str(item.get("as_of") or "")[:10] <= period["end"]
+            valid = sorted([item for item in entries if isinstance(item, dict) and str(item.get("thscode") or code).upper() == code
+                and period["start"] <= str(item.get("as_of") or "")[:10] <= period["end"]
                 and isinstance(item.get("close"), (int, float))], key=lambda item: item["as_of"])
             if len(valid) >= 2 and valid[0]["close"]:
                 trends.append({"thscode": code, "name": names.get(code, code), "first_close": valid[0]["close"],
@@ -88,6 +92,12 @@ async def collect_market_evidence(store, context, tools, slots) -> StockAgentRes
         result["historical_indices"] = trends
         if len(trends) != len(codes):
             result["warnings"].append("历史行情未返回所要求区间内足够的数据，暂不能判断该区间的走势。")
+        if trends and not result["indices"]:
+            result["failed"] = False
+            result["as_of"] = max(item["as_of"] for item in trends)
+            result["snapshot_time"] = ""
+            result["warnings"] = [w for w in result["warnings"] if w != "fuyao_unavailable"]
+            result["warnings"].append("最新指数快照暂不可用，以下仅展示所请求区间内的历史数据。")
     aggregate = await asyncio.to_thread(store.put, context, tool_call_id="market:aggregate", tool_name="aggregate_market_snapshot",
         evidence_type="market_overview", payload=result, source="fuyao", as_of=result["as_of"], arguments={"evidence_ids": [r["id"] for r in rows]})
     moves = [float(item["change_pct"]) for item in result["indices"] if isinstance(item.get("change_pct"), (int, float))]
@@ -96,4 +106,4 @@ async def collect_market_evidence(store, context, tools, slots) -> StockAgentRes
     if result.get("historical_indices"):
         summary += "历史区间仅根据返回的有效交易日收盘序列分析，不与最新快照直接拼接。"
     return StockAgentResponse(scenario="market_overview", summary=summary, evidence_ids=[aggregate["id"]],
-        warnings=result["warnings"], evidence_quality="partial" if quotes else "failed", failed=result["failed"])
+        warnings=result["warnings"], evidence_quality="failed" if result["failed"] else "partial", failed=result["failed"])

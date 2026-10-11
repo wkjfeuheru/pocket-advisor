@@ -327,7 +327,8 @@ def test_server_assembles_artifact_from_evidence_and_suppresses_unsupported_numb
         evidence_ids=[], evidence_quality="ok", failed=False,
     )
     degraded = assemble_stock_result(unsupported, _context(), store)
-    assert degraded.result is None
+    assert degraded.result is not None and degraded.result.evidence_quality == "failed"
+    assert degraded.result.market_overview["indices"] == []
     assert degraded.candidates == []
     assert degraded.status == "degraded"
     assert "9999" not in degraded.summary
@@ -373,7 +374,8 @@ def test_unusable_evidence_returns_a_nonfatal_generic_answer(scenario, evidence_
     ), _context(), store)
 
     assert result.status == "degraded"
-    assert result.result is None
+    assert result.result is not None and result.result.evidence_quality == "failed"
+    assert result.result.scenario == scenario
     assert result.candidates == []
     assert "个股结论" not in result.summary
 

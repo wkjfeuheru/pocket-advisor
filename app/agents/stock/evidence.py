@@ -19,6 +19,8 @@ PUBLIC_SCHEMA = "stock-public-v1"
 _NUMERIC = {
     "change_pct",
     "last",
+    "first_close",
+    "last_close",
     "score",
     "pe",
     "pb",
@@ -141,7 +143,7 @@ def apply_evidence_guard(payload: dict[str, Any], request: StockRequest) -> dict
     if scenario == "market_overview":
         block = cleaned.get("market_overview") or {}
         indices = list(block.get("indices") or [])
-        if not indices:
+        if not indices and not block.get("historical_indices"):
             failed = True
             warnings.append("缺少带来源的指数行情")
         cleaned["market_overview"] = {**block, "indices": indices}

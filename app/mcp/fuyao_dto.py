@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import re
+import calendar
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 from typing import Any
@@ -36,6 +38,7 @@ _SPECS: dict[str, dict[str, tuple[str, ...]]] = {
         "as_of": ("as_of", "update_time", "timestamp"),
     },
     "kline": {
+        "thscode": ("thscode", "ts_code", "symbol"),
         "close": ("close", "close_price"),
         "high": ("high", "high_price"),
         "low": ("low", "low_price"),
@@ -112,6 +115,10 @@ _ABILITY_INDICATORS: dict[str, tuple[str, ...]] = {
 def _as_iso(value: Any, *, date_only: bool = False) -> Any:
     """区分业务日期与带时刻的快照截止时间，不丢失盘中精度。"""
     text = str(value if value is not None else "").strip()
+    quarter = re.fullmatch(r"(20\d{2})-([1-4])", text)
+    if quarter:
+        year, month = int(quarter.group(1)), int(quarter.group(2)) * 3
+        return f"{year:04}-{month:02}-{calendar.monthrange(year, month)[1]:02}"
     if text.isdigit() and len(text) == 8:
         try:
             return datetime.strptime(text, "%Y%m%d").date().isoformat()
@@ -213,7 +220,7 @@ def normalize_payload(operation: str, payload: Any) -> Any:
         if isinstance(rows, list):
             timestamp = str(data.get("timestamp") or payload.get("as_of") or "")
             return normalize_payload(operation, [
-                {**row, "timestamp": row.get("timestamp") or timestamp}
+                {**({"thscode": data["thscode"]} if data.get("thscode") else {}), **row, "timestamp": row.get("timestamp") or timestamp}
                 for row in rows
                 if isinstance(row, dict)
             ])

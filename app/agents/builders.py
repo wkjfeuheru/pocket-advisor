@@ -118,7 +118,10 @@ def _worker_input(task: str, state: dict, *, store: Any = None, context: Evidenc
             except (EvidenceAccessError, ValidationError):
                 continue
         dependencies.append({"task_id": dependency_id, "facts": verified})
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
     payload = {"task": task, "task_spec": task_spec, "user_query": state.get("user_query") or task,
+               "current_datetime": datetime.now(ZoneInfo("Asia/Shanghai")).isoformat(),
                "domain_slots": state.get("domain_slots") or {},
                "profile_snapshot": state.get("profile_snapshot") or {}, "dependency_results": dependencies}
     return {"messages": [{"role": "user", "content": json.dumps(payload, ensure_ascii=False, default=str)}]}
@@ -264,15 +267,18 @@ def stock_agent_runner(stock_agent: Any, evidence_store: Any, *, warning: str = 
                 structured = result.get("structured_response") if isinstance(result, dict) else None
                 if structured is None:
                     structured = StockAgentResponse(
-                        scenario="equity_research",
-                        summary="",
-                        warnings=["missing_structured_response"],
-                        evidence_quality="failed",
-                        failed=True,
+                        scenario=slots.get("scenario") or "equity_research",
+                        summary="已获取部分证据，按有效数据展示。",
+                        evidence_ids=[row["id"] for row in execution.rows] if execution else [],
+                        warnings=["missing_structured_response"], evidence_quality="partial", failed=False,
                     )
+                parsed = structured if isinstance(structured, StockAgentResponse) else StockAgentResponse.model_validate(structured)
+                if slots.get("scenario") and parsed.scenario != slots["scenario"]:
+                    parsed = parsed.model_copy(update={"scenario": slots["scenario"]})
+                structured = parsed
                 assembled = await asyncio.to_thread(assemble_stock_result, structured, context, evidence_store)
                 parsed = structured if isinstance(structured, StockAgentResponse) else StockAgentResponse.model_validate(structured)
-                if assembled.result is not None:
+                if assembled.result is not None and assembled.result.evidence_quality != "failed":
                     assembled.evidence_ids = list(dict.fromkeys(parsed.evidence_ids))
                     assembled.facts = [fact.model_dump(mode="json") for fact in await asyncio.to_thread(
                         facts_from_evidence, evidence_store, context, assembled.evidence_ids)]

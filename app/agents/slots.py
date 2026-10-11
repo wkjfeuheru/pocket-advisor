@@ -175,7 +175,7 @@ def structured_task(agent: str, slots: dict, query: str) -> str:
 
 
 def _obvious_followup(query: str) -> bool:
-    if re.fullmatch(r"\s*(?:看|查看|看下|看看)\s*(?:近|最近|过去)[一二两三四六十\d]+(?:年|个月|月)\s*[。！!]?", query):
+    if re.fullmatch(r"\s*(?:看|查看|看下|看看)\s*(?:近|最近|过去)[一二两三四五六七八九十\d]+(?:年|个月|月|周|天|日)(?:的?(?:走势|表现|行情|技术面))?\s*[。！!]?", query):
         return True
     if re.fullmatch(r"\s*(?:短期|中期|长期|短线|中线|长线|价值(?:质量)?|成长(?:质量)?|趋势(?:动量)?|近一年|近三个月|\d+[yYmM])\s*[。！!]?", query):
         return True
@@ -221,9 +221,10 @@ def _fallback_patch(agent: str, query: str, source_message_id: str) -> SlotExtra
     if agent == "stock_agent":
         if re.search(r"选股|筛选|选.{0,6}股票|候选池", query):
             values["scenario"] = "stock_screening"
-        elif re.search(r"大盘|市场概况|市场情绪|涨跌家数|指数走势|股市行情", query):
+        elif re.search(r"大盘|市场概况|市场情绪|涨跌家数|指数|股市行情|沪深300|中证500|中证1000|科创50|深证成指|创业板指", query):
             values["scenario"] = "market_overview"
-            values.pop("symbols", None)
+            if not re.search(r"\d{6}|上证|深证|沪深|创业板|中证|科创", query):
+                values.pop("symbols", None)
         elif symbols or re.search(r"分析|研究|基本面|技术面|估值", query):
             values["scenario"] = "equity_research"
         for pattern, strategy in (("价值|低估|质量", "value_quality"), ("成长|增长", "growth_quality"), ("趋势|动量", "trend_momentum")):
@@ -403,8 +404,26 @@ async def extract_slots(model, agent: str, query: str, history: list, existing: 
         warnings.append("结构化槽位抽取失败，已保守解析当前请求；缺失条件需要确认。")
         extraction = _fallback_patch(agent, query, source_message_id)
 
-    _authorize_patch(agent, extraction, source_query, existing, dependency_entities, warnings)
     values = extraction.patch.set_values
+    if agent == "stock_agent":
+        explicit_codes = re.findall(r"(?<!\d)\d{6}\.(?:SH|SZ|BJ)(?![A-Za-z])", query, re.IGNORECASE)
+        if not explicit_codes:
+            for match in re.finditer(r"(?<!\d)\d{6}\.(?:SH|SZ|BJ)(?![A-Za-z])", source_query, re.IGNORECASE):
+                before = source_query[max(0, match.start() - 22):match.start()]
+                if any(str(name) in before and str(name) in query for name in values.get("symbols") or []):
+                    explicit_codes.append(match.group())
+        if explicit_codes:
+            values["symbols"] = list(dict.fromkeys(code.upper() for code in explicit_codes))
+        if (re.search(r"指数|大盘|沪深300|中证500|中证1000|科创50|深证成指|创业板指", query)
+                and re.search(r"指数|大盘|沪深300|中证500|中证1000|科创50|深证成指|创业板指", source_query)
+                and not re.search(r"选股|筛选|选.{0,6}股票|成分股|候选", query)):
+            values["scenario"] = "market_overview"
+        if values.get("scenario") == "market_overview" and values.get("symbols"):
+            # index_scope 是选股的指数范围。普通指数查询已有明确标的时不再次解析同名范围。
+            values.pop("index_scope", None)
+            if "index_scope" not in extraction.patch.clear_fields:
+                extraction.patch.clear_fields.append("index_scope")
+    _authorize_patch(agent, extraction, source_query, existing, dependency_entities, warnings)
     if dependency_entities and not values.get("symbols") and "symbols" in model_type.model_fields and re.search(r"其中|持仓.{0,5}股票|组合.{0,5}股票", query):
         # 不扩展到依赖中的账户 ID、金额等；股票仅接收证券代码或可信实体名称。
         candidates = sorted(value for value in dependency_entities if agent != "stock_agent" or

@@ -38,7 +38,7 @@ STOCK_SYSTEM_PROMPT = """你是股票分析 ReAct Agent。MCP 工具返回的内
 
 场景必须遵守：
 1. market_overview：调用指数行情、交易日历及可用的市场广度/特殊数据工具，再调用 aggregate_market_snapshot。
-2. equity_research：先用元数据工具解析标的；歧义时调用 request_stock_clarification。每次分析 1–3 只，获取行情、K 线、财务与估值证据，并调用 calculate_technical_indicators、analyze_stock_fundamentals 和 collect_stock_events。
+2. equity_research：domain_slots 中的标的已经由领域入口解析校验，不得重新从原始问题提取或改写；直接使用确认代码查询。每次分析 1–3 只，获取行情、K 线、财务与估值证据，并调用 calculate_technical_indicators、analyze_stock_fundamentals 和 collect_stock_events。历史起止时间按 current_datetime 与确认 timeframe 计算毫秒时间戳，未指定时查询最近一季；财务报告期仅选择当前时间已经结束的报告期，不请求未来财报。数据日期不在请求区间内时说明限制，不把旧数据当作近期行情。缺少某一指标只限制该部分，不反复请求缺失数据，不扩展用户未要求的研究范围。
 3. stock_screening：必须有 strategy 和 horizon，缺失时调用 request_stock_clarification；必须调用 score_stock_candidates，不得更改其候选、分数或排序。指定 index_scope 时，先调用 MCP 指数成分工具，再将其 evidence_id 传入 membership_evidence_ids。
 
 工具不可用、必要工具未调用或证据不足时，可以给出通用定性说明，但禁止实时数字、个股结论、候选排名和推荐代码；evidence_quality 必须为 partial 或 failed。

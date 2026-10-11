@@ -28,10 +28,15 @@ def _symbol(payload: dict[str, Any]) -> str:
 
 def _generic_failure(response: StockAgentResponse, warning: str) -> StockResult:
     """无证据时的降级结果：有产出（通用定性说明），但不算整轮失败。"""
+    block = {"market_overview": {"failed": True, "indices": [], "breadth": {}, "sectors": {}}} if response.scenario == "market_overview" else (
+        {"stock_screening": {"failed": True, "candidates": []}} if response.scenario == "stock_screening" else {"equity_research": []})
     return StockResult(
         status="degraded",
-        summary="缺少可验证的实时证据，仅能提供通用定性说明。",
+        summary="当前缺少可核验数据，暂不能完成该查询。",
         warnings=list(dict.fromkeys([*response.warnings, warning])),
+        result=StockResultV1(scenario=response.scenario, summary="当前缺少可核验数据，暂不能完成该查询。",
+            warnings=list(dict.fromkeys([*response.warnings, warning])), evidence_quality="failed",
+            **block),
     )
 
 
@@ -87,7 +92,7 @@ def assemble_stock_result(response: StockAgentResponse | dict[str, Any], context
 
     if parsed.scenario == "market_overview":
         found = next((_payload(row) for row in reversed(rows) if row.get("evidence_type") == "market_overview"), None)
-        if not found or found.get("failed") or not found.get("indices"):
+        if not found or found.get("failed") or not (found.get("indices") or found.get("historical_indices")):
             return _generic_failure(parsed, "missing_market_aggregate")
         kwargs["market_overview"] = found
         warnings.extend(found.get("warnings") or [])

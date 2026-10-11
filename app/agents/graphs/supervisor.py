@@ -6,6 +6,7 @@ import json
 import logging
 import re
 import hashlib
+from pydantic import ValidationError
 from typing import Any
 
 from anyio import to_thread
@@ -49,8 +50,16 @@ def profile_of(state):
 
 
 async def structured(model, schema, messages):
-    result = await model.with_structured_output(schema, method="function_calling").ainvoke(messages, get_config())
-    return result if isinstance(result, schema) else schema.model_validate(result)
+    for attempt in range(2):
+        try:
+            result = await model.with_structured_output(schema, method="function_calling").ainvoke(messages, get_config())
+            return result if isinstance(result, schema) else schema.model_validate(result)
+        except ValidationError as exc:
+            fields = [".".join(str(part) for part in err["loc"]) for err in exc.errors(include_input=False, include_context=False)]
+            logger.warning("advisor_schema_invalid schema=%s fields=%s", schema.__name__, fields)
+            if attempt:
+                raise
+            messages = [*messages, {"role": "system", "content": "上次结构化返回不符合声明的schema。请严格使用枚举值与字段类型；不得添加字段。需要修正的字段：" + "、".join(fields)}]
 
 
 def build_supervisor_graph(*, model, specialists, checkpointer=None, risk_of=None,
@@ -299,8 +308,10 @@ def build_supervisor_graph(*, model, specialists, checkpointer=None, risk_of=Non
         # Replanning is limited to feedback after real work, and cannot override dependency/budget gates.
         decisions = state.get("decision_count", 0)
         market_only_complete = bool(latest) and all(isinstance(item.result, StockResult)
-            and item.result.result is not None and item.result.result.scenario == "market_overview"
-            and item.result.result.market_overview and item.result.result.market_overview.get("indices")
+            and item.result.result is not None and (
+                item.result.result.scenario == "market_overview" and item.result.result.market_overview
+                and (item.result.result.market_overview.get("indices") or item.result.result.market_overview.get("historical_indices"))
+                or any(code in warning for warning in item.result.warnings for code in ("stock_snapshot_stale", "missing_screening_result")))
             for item in latest.values())
         if latest and not market_only_complete and decisions < state.get("batch_count", 0) and state.get("batch_count", 0) < max_batches:
             try:
@@ -521,6 +532,11 @@ def build_supervisor_graph(*, model, specialists, checkpointer=None, risk_of=Non
 
     async def compliance_node(state):
         latest = latest_results(state)
+        pending = state["session_context"].get("pending_tasks") or []
+        if not latest and pending:
+            text = pending[0]["question"] + "\n\n" + SIMULATED_DISCLAIMER
+            get_stream_writer()({"text": text})
+            return {"final": FinalAnswer(answer=text)}
         facts = {}
         materials = []
         for task_id, item in latest.items():
@@ -545,7 +561,6 @@ def build_supervisor_graph(*, model, specialists, checkpointer=None, risk_of=Non
             public_result = result.model_dump()
             public_result["warnings"] = public_warnings(result.warnings)
             materials.append({"task_id": task_id, "result": public_result, "artifact": artifact_for_result(result)})
-        pending = state["session_context"].get("pending_tasks") or []
         payload = {"original_query": state["user_query"], "tasks": [t.model_dump() for t in tasks_of(state)],
                    "slots": state.get("prepared"), "results": materials, "facts": facts,
                    "profile": profile_of(state), "suitability": state["suitability"].model_dump(),
@@ -579,6 +594,10 @@ def build_supervisor_graph(*, model, specialists, checkpointer=None, risk_of=Non
             and item.result.result.scenario == "market_overview"))
         if any(calendar_days):
             text += "；交易日历最近交易日：" + "、".join(day for day in calendar_days if day)
+        report_days = list(dict.fromkeys(str(fact.get("as_of") or "")[:10] for fact in facts.values()
+            if fact.get("metric") in {"roe", "gross_margin", "leverage", "revenue_trend", "profit_trend"} and fact.get("as_of")))
+        if report_days:
+            text += "\n财务指标报告截止日：" + "、".join(report_days)
         # 推荐码行不进入用户可见文本（仅保留在 FinalAnswer.recommendations，供内部与评估使用）。
         if plan.recommendations:
             logger.info("advisor_recommendations request_id=%s count=%s",

@@ -25,7 +25,16 @@ def project_artifact(agent: str, payload: dict[str, Any]) -> dict[str, Any]:
     projector = _PROJECTORS.get(str(agent or ""))
     if projector is None:
         return {}
-    return projector(dict(payload or {}))
+    projected = projector(dict(payload or {}))
+    from app.agents.public_warnings import public_warnings
+    def clean(value):
+        if isinstance(value, dict):
+            return {key: public_warnings(item) if key == "warnings" and isinstance(item, list) else clean(item)
+                    for key, item in value.items()}
+        if isinstance(value, list):
+            return [clean(item) for item in value]
+        return value
+    return clean(projected)
 
 
 def artifact_for_result(result: WorkerBase) -> dict[str, Any]:

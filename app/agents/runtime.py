@@ -65,6 +65,9 @@ def build_slot_resolvers(library: Any, mcp_tools: list[Any]) -> dict[str, Any]:
             resolved = []
             for raw in slots.get(field) or []:
                 raw = str(raw).strip()
+                embedded_codes = re.findall(r"(?<!\d)\d{6}\.(?:SH|SZ|BJ)(?![A-Za-z])", raw, re.IGNORECASE)
+                if len(embedded_codes) == 1:
+                    raw = embedded_codes[0]
                 if canonical.fullmatch(raw.upper()):
                     resolved.append(raw.upper())
                     continue
@@ -79,7 +82,10 @@ def build_slot_resolvers(library: Any, mcp_tools: list[Any]) -> dict[str, Any]:
                     return missing(output, [], field, "security_search_schema_unavailable")
                 try:
                     async with asyncio.timeout(15):
-                        result = await search.ainvoke({argument: raw})
+                        arguments = {argument: raw}
+                        if "asset_type" in schema:
+                            arguments["asset_type"] = "a-share-index" if field == "index_scope" or slots.get("scenario") == "market_overview" else "a-share"
+                        result = await search.ainvoke(arguments)
                     normalized = normalize_payload("search_security", _payload(result))
                 except Exception:  # noqa: BLE001 - 元数据不可用时只允许补充明确代码
                     return missing(output, [], field, "security_metadata_unavailable")
