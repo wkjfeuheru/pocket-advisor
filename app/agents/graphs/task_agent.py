@@ -18,22 +18,34 @@ from langgraph.config import get_config
 from app.agents.graphs.state import (
     AGENT_NAMES,
     PROFILE_FIELDS,
+    RESULT_KEY,
+    RESULT_MODEL,
     AdvisorState,
+    FinalAnswer,
+    Intent,
     IntentResult,
+    PortfolioResult,
+    ProductResult,
+    ReviewState,
     RewrittenQuery,
-    empty_result,
+    SuitabilityResult,
+    WorkerBase,
+    worker_failure,
 )
 from app.agents.prompts.task_agent_prompts import (
     AGGREGATOR_SYSTEM_PROMPT,
     CLASSIFY_SYSTEM_PROMPT,
     RESOLVE_SYSTEM_PROMPT,
 )
-from app.agents.artifacts import project_artifact
+from app.agents.artifacts import artifact_for_result
 from app.services.portfolio_service import SIMULATED_DISCLAIMER
 
 _TRADE_LANGUAGE = re.compile(r"买入|卖出|加仓|减仓|目标价|买卖点|仓位比例|仓位\s*\d+\s*%")
 
-Specialist = Callable[[str, dict], Awaitable[dict]]
+Specialist = Callable[[str, dict], Awaitable[WorkerBase]]
+
+#: 结果通道 → agent 名（compliance 里给材料打标签用）。
+_AGENT_BY_KEY = {key: agent for agent, key in RESULT_KEY.items()}
 
 _CODE_LINE = re.compile(r"推荐代码\s*[:：]\s*([^\n]+)")
 _RISK = re.compile(r"R([1-5])", re.IGNORECASE)
@@ -46,10 +58,15 @@ _NON_DEGRADABLE = {
 }
 
 STAGE_LABELS = {
+    "supervisor": "规划与核对任务",
+    "stock_slot_extractor": "核对股票参数",
+    "product_slot_extractor": "核对商品参数",
+    "portfolio_slot_extractor": "核对持仓参数",
+    "allocation_confirm": "生成与确认配置方案",
     "resolve_query": "理解追问",
     "classify_intent": "识别问题",
     "profile_gate": "核对画像",
-    "dispatch_intents": "分派任务",
+    "dispatch_tasks": "分派任务",
     "stock_agent": "查询行情",
     "product_agent": "查询商品",
     "portfolio_agent": "查询持仓",
@@ -132,7 +149,7 @@ def _task_for(state: AdvisorState, agent: str) -> str:
     return _message_text(messages[-1]) if messages else ""
 
 
-def build_advisor_graph(
+def build_legacy_advisor_graph(
     *,
     model: Any,
     specialists: dict[str, Specialist],
@@ -181,7 +198,7 @@ def build_advisor_graph(
         except Exception as exc:
             if not is_degradable(exc):
                 raise
-            return {"warnings": ["问题理解暂不可用，已按原文处理"]}
+            return {"turn_warnings": ["问题理解暂不可用，已按原文处理"]}
         if isinstance(result, dict):
             rewritten = str(result.get("task") or "")
         else:
@@ -200,9 +217,9 @@ def build_advisor_graph(
             {"role": "system", "content": CLASSIFY_SYSTEM_PROMPT},
             *history,
         ])
-        intents = result.intents if hasattr(result, "intents") else result["intents"]
-        dumped = [item.model_dump() if hasattr(item, "model_dump") else dict(item) for item in intents]
-        return {"intents": dumped}
+        raw = result.intents if hasattr(result, "intents") else result["intents"]
+        intents = [item if isinstance(item, Intent) else Intent.model_validate(item) for item in raw]
+        return {"intents": intents}
 
     def profile_gate(state: AdvisorState) -> dict:
         intents = _intent_dicts(state)
@@ -227,7 +244,7 @@ def build_advisor_graph(
             interrupt({"missing_fields": still_missing, "profile": profile})
         return {"profile_snapshot": profile}
 
-    def dispatch_intents(state: AdvisorState) -> Command:
+    def dispatch_tasks(state: AdvisorState) -> Command:
         resolved = str(state.get("resolved_task") or "")
         sends = []
         for intent in _intent_dicts(state):
@@ -249,6 +266,22 @@ def build_advisor_graph(
             }))
         return Command(goto=sends)
 
+    def _coerce_result(agent: str, result: Any) -> WorkerBase:
+        """把 worker 返回值收口成对应类型的结果对象。
+
+        worker 允许返回 typed 结果或 dict（fakes 友好）；形状不符时降级为 ``failed``，
+        不把整轮打崩。``extra="forbid"`` 在这一步校验多余键。
+        """
+        model = RESULT_MODEL[agent]
+        if isinstance(result, model):
+            return result
+        if isinstance(result, dict):
+            try:
+                return model.model_validate(result)
+            except Exception:  # noqa: BLE001 - 形状不符即降级
+                return worker_failure(agent, f"{agent} 暂不可用")
+        return worker_failure(agent, f"{agent} 暂不可用")
+
     def _specialist_node(agent: str):
         async def run(state: AdvisorState) -> dict:
             task = _task_for(state, agent)
@@ -257,19 +290,8 @@ def build_advisor_graph(
             except Exception as exc:
                 if not is_degradable(exc):
                     raise
-                result = empty_result(agent, f"{agent} 暂不可用")
-            if not isinstance(result, dict):
-                result = empty_result(agent, f"{agent} 暂不可用")
-            result.setdefault("agent", agent)
-            result.setdefault("recommended_product_codes", [])
-            result.setdefault("candidate_stocks", [])
-            result.setdefault("artifacts", [])
-            result.setdefault("warnings", [])
-            result.setdefault("source", "")
-            result.setdefault("as_of", "")
-            result.setdefault("failed", False)
-            warnings = [str(item) for item in result.get("warnings") or [] if item]
-            return {"agent_results": [result], "warnings": warnings}
+                result = worker_failure(agent, f"{agent} 暂不可用")
+            return {RESULT_KEY[agent]: _coerce_result(agent, result)}
 
         return run
 
@@ -296,54 +318,48 @@ def build_advisor_graph(
                 if not is_degradable(exc):
                     raise
                 return await fallback(state)
-            if not isinstance(result, dict):
+            if not isinstance(result, (WorkerBase, dict)):
                 return await fallback(state)
-            result.setdefault("agent", "portfolio_agent")
-            result.setdefault("recommended_product_codes", [])
-            result.setdefault("candidate_stocks", [])
-            result.setdefault("artifacts", [])
-            result.setdefault("warnings", [])
-            result.setdefault("source", "")
-            result.setdefault("as_of", "")
-            result.setdefault("failed", False)
-            return {
-                "agent_results": [result],
-                "warnings": [str(item) for item in result.get("warnings") or [] if item],
-            }
+            return {RESULT_KEY["portfolio_agent"]: _coerce_result("portfolio_agent", result)}
 
         return run
 
     def suitability_guard(state: AdvisorState) -> dict:
-        results = list(state.get("agent_results") or [])
-        if not results or all(bool(item.get("failed")) for item in results):
+        present = [
+            result
+            for key in RESULT_KEY.values()
+            if isinstance(result := state.get(key), WorkerBase)
+        ]
+        if not present or all(result.status == "failed" for result in present):
             raise AllBranchesFailed("全部专业分支失败")
         profile = state.get("profile_snapshot") or {}
         user_rank = risk_rank(str(profile.get("risk_level") or ""))
+        codes: list[str] = []
+        product = state.get("product_result")
+        if isinstance(product, ProductResult):
+            codes.extend(product.recommended_codes)
+        portfolio = state.get("portfolio_result")
+        if isinstance(portfolio, PortfolioResult):
+            codes.extend(portfolio.recommended_codes)
         allowed: list[str] = []
         blocked: list[str] = []
-        for result in results:
-            for code in result.get("recommended_product_codes") or []:
-                code = str(code).strip()
-                if not code:
-                    continue
-                product_rank = _risk(code)
-                if user_rank is None or product_rank is None or product_rank > user_rank:
-                    blocked.append(code)
-                elif code not in allowed:
-                    allowed.append(code)
+        for code in codes:
+            code = str(code).strip()
+            if not code:
+                continue
+            product_rank = _risk(code)
+            if user_rank is None or product_rank is None or product_rank > user_rank:
+                blocked.append(code)
+            elif code not in allowed:
+                allowed.append(code)
         blocked = [code for code in dict.fromkeys(blocked) if code not in allowed]
-        return {"suitability_result": {"allowed": allowed, "blocked": blocked}}
+        return {"suitability": SuitabilityResult(allowed=allowed, blocked=blocked)}
 
-    def _evidence_brief(result: dict) -> str:
-        lines = [f"summary: {result.get('content') or ''}"]
-        agent = str(result.get("agent") or "")
-        for item in result.get("artifacts") or []:
-            if not isinstance(item, dict):
-                continue
-            public = project_artifact(agent, item)
-            if not public:
-                continue
-            lines.append("evidence: " + json.dumps(public, ensure_ascii=False, default=str))
+    def _evidence_brief(result: WorkerBase) -> str:
+        lines = [f"summary: {result.summary or ''}"]
+        evidence = artifact_for_result(result)
+        if evidence:
+            lines.append("evidence: " + json.dumps(evidence, ensure_ascii=False, default=str))
         return "\n".join(lines)
 
     async def compliance_node(state: AdvisorState) -> dict:
@@ -351,31 +367,35 @@ def build_advisor_graph(
 
         合并了原 ``aggregator``（生成）与 ``output_guard``（校验）：
         生成后立即按适配性白名单过滤推荐、剔除交易性用语并补全免责声明；
-        若推荐清单越权且尚未重写过，则置 ``needs_rewrite`` 触发一次重写。
+        若推荐清单越权且尚未重写过，则置 ``review.needs_rewrite`` 触发一次重写。
         """
         # ---- 生成：汇总专业结果 + 适配性白名单，交给模型产出回答草稿 ----
-        suitability = state.get("suitability_result") or {}
+        suitability = state.get("suitability") or SuitabilityResult()
         materials = []
-        for result in state.get("agent_results") or []:
-            if result.get("failed"):
-                materials.append(f"{result.get('agent')}: {result.get('content') or '暂不可用'}")
+        for key, agent in _AGENT_BY_KEY.items():
+            result = state.get(key)
+            if not isinstance(result, WorkerBase):
+                continue
+            if result.status == "failed":
+                materials.append(f"{agent}: {result.summary or '暂不可用'}")
                 continue
             materials.append(
                 "\n".join([
-                    f"agent: {result.get('agent')}",
+                    f"agent: {agent}",
                     _evidence_brief(result),
-                    f"source: {result.get('source') or ''}",
-                    f"as_of: {result.get('as_of') or ''}",
-                    f"warnings: {', '.join(result.get('warnings') or [])}",
+                    f"source: {result.source or ''}",
+                    f"as_of: {result.as_of or ''}",
+                    f"warnings: {', '.join(result.warnings or [])}",
                 ])
             )
-        feedback = state.get("guard_feedback") or ""
+        review = state.get("review")
+        feedback = (review.feedback if isinstance(review, ReviewState) else "") or ""
         human = "\n\n".join([
             "专业结果：",
             "\n---\n".join(materials) or "无",
             f"画像快照：{state.get('profile_snapshot') or {}}",
-            f"允许推荐：{suitability.get('allowed') or []}",
-            f"禁止推荐：{suitability.get('blocked') or []}",
+            f"允许推荐：{suitability.allowed}",
+            f"禁止推荐：{suitability.blocked}",
             f"校验反馈：{feedback}",
         ])
         parts: list[str] = []
@@ -392,18 +412,19 @@ def build_advisor_graph(
         answer = "".join(parts).strip()
 
         # ---- 合规校验：越权推荐触发一次重写，否则就地清理并定稿 ----
-        allowed = set(suitability.get("allowed") or [])
-        blocked = set(suitability.get("blocked") or [])
+        allowed = set(suitability.allowed)
+        blocked = set(suitability.blocked)
         recommended = parse_recommendations(answer)
         bad = [code for code in recommended if code in blocked or code not in allowed]
-        count = int(state.get("rewrite_count") or 0)
+        count = review.rewrite_count if isinstance(review, ReviewState) else 0
         if bad and count < 1:
             return {
-                "final_result": answer,
-                "final_recommendations": recommended,
-                "needs_rewrite": True,
-                "rewrite_count": count + 1,
-                "guard_feedback": f"推荐清单包含不适配代码 {', '.join(bad)}，请去掉这些推荐。",
+                "final": FinalAnswer(answer=answer, recommendations=recommended),
+                "review": ReviewState(
+                    rewrite_count=count + 1,
+                    needs_rewrite=True,
+                    feedback=f"推荐清单包含不适配代码 {', '.join(bad)}，请去掉这些推荐。",
+                ),
             }
         text = answer
         recommendations = [code for code in recommended if code in allowed and code not in blocked]
@@ -414,13 +435,13 @@ def build_advisor_graph(
         if SIMULATED_DISCLAIMER not in text:
             text = f"{text.rstrip()}\n\n{SIMULATED_DISCLAIMER}".strip()
         return {
-            "needs_rewrite": False,
-            "final_result": text,
-            "final_recommendations": recommendations,
+            "final": FinalAnswer(answer=text, recommendations=recommendations),
+            "review": ReviewState(rewrite_count=count, needs_rewrite=False),
         }
 
     def route_after_compliance(state: AdvisorState) -> str:
-        if state.get("needs_rewrite"):
+        review = state.get("review")
+        if isinstance(review, ReviewState) and review.needs_rewrite:
             return "compliance_node"
         return END
 
@@ -429,8 +450,8 @@ def build_advisor_graph(
     graph.add_node("classify_intent", classify_intent)
     graph.add_node("profile_gate", profile_gate)
     graph.add_node(
-        "dispatch_intents",
-        dispatch_intents,
+        "dispatch_tasks",
+        dispatch_tasks,
         destinations=AGENT_NAMES,
     )
     for agent in AGENT_NAMES:
@@ -446,10 +467,16 @@ def build_advisor_graph(
     graph.add_edge(START, "resolve_query")
     graph.add_edge("resolve_query", "classify_intent")
     graph.add_edge("classify_intent", "profile_gate")
-    graph.add_edge("profile_gate", "dispatch_intents")
+    graph.add_edge("profile_gate", "dispatch_tasks")
     graph.add_edge("suitability_guard", "compliance_node")
     graph.add_conditional_edges("compliance_node", route_after_compliance, ["compliance_node", END])
     return graph.compile(checkpointer=checkpointer)
+
+
+def build_advisor_graph(**kwargs):
+    """生产入口仅编译 advisor-v2；v1 保留用于旧行为的回归对照。"""
+    from app.agents.graphs.supervisor import build_supervisor_graph
+    return build_supervisor_graph(**kwargs)
 
 
 __all__ = [

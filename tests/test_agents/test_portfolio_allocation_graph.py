@@ -14,8 +14,9 @@ import pytest
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.types import Command
 
-from app.agents.graphs.state import IntentResult
-from app.agents.graphs.task_agent import build_advisor_graph
+from app.agents.graphs.state import IntentResult, PortfolioResult
+from app.agents.graphs.task_agent import build_legacy_advisor_graph as build_advisor_graph
+from app.agents.portfolio.contracts import AllocationOutcome
 
 from tests.test_agents.test_advisor_graph import ScriptedModel, _intent, _interrupt_value, _specialist
 
@@ -55,13 +56,18 @@ class _RecordingRunner:
         }
         chosen = interrupt(payload)
         self.adopted.append(str(chosen.get("plan_id")))
-        return {
-            "agent": "portfolio_agent",
-            "content": f"已采纳方案 {chosen.get('plan_id')}",
-            "artifacts": [{"scenario": "allocation_adopted", "allocation_adopted": chosen}],
-            "warnings": [],
-            "failed": False,
-        }
+        return PortfolioResult(
+            status="ok",
+            summary=f"已采纳方案 {chosen.get('plan_id')}",
+            source="postgresql",
+            adopted=AllocationOutcome(
+                plan_id=str(chosen.get("plan_id")),
+                tier="moderate",
+                tier_label="中度",
+                unit_nav=1.01,
+                trade_count=1,
+            ),
+        )
 
 
 def _graph(model, runner, saver):
@@ -124,17 +130,12 @@ def test_the_graph_suspends_on_the_allocation_branch_and_resumes_on_a_second_gra
     done = asyncio.run(resume())
 
     assert runner.adopted == ["p-moderate"]
-    # 采纳结果落在 agent_results 里（分支是并行 Send 出去的子任务）；
-    # final_result 由 compliance_node 产出，不该指望它复述分支内容。
-    results = list(done.values.get("agent_results") or [])
-    adopted = [
-        artifact
-        for result in results
-        for artifact in (result.get("artifacts") or [])
-        if artifact.get("scenario") == "allocation_adopted"
-    ]
-    assert adopted, f"没有采纳产物；agent_results={results}"
-    assert adopted[0]["allocation_adopted"]["plan_id"] == "p-moderate"
+    # 采纳结果落在 portfolio_result.adopted 上（分支是并行 Send 出去的子任务）；
+    # final.answer 由 compliance_node 产出，不该指望它复述分支内容。
+    portfolio = done.values.get("portfolio_result")
+    assert isinstance(portfolio, PortfolioResult)
+    assert portfolio.adopted is not None
+    assert portfolio.adopted.plan_id == "p-moderate"
 
 
 def test_without_a_runner_the_portfolio_node_stays_a_plain_specialist():
@@ -165,9 +166,9 @@ def test_without_a_runner_the_portfolio_node_stays_a_plain_specialist():
 
     # 没有挂起：直接跑完
     assert state.next == ()
-    results = list(state.values.get("agent_results") or [])
-    contents = " ".join(str(r.get("content") or "") for r in results)
-    assert "组合说明" in contents, f"agent_results={results}"
+    portfolio = state.values.get("portfolio_result")
+    assert isinstance(portfolio, PortfolioResult)
+    assert "组合说明" in portfolio.summary, f"portfolio_result={portfolio}"
 
 
 def test_a_missing_customer_id_falls_back_instead_of_interrupting():
@@ -189,9 +190,9 @@ def test_a_missing_customer_id_falls_back_instead_of_interrupting():
 
     assert state.next == ()
     assert runner.calls == []
-    results = list(state.values.get("agent_results") or [])
-    contents = " ".join(str(r.get("content") or "") for r in results)
-    assert "组合说明" in contents, f"agent_results={results}"
+    portfolio = state.values.get("portfolio_result")
+    assert isinstance(portfolio, PortfolioResult)
+    assert "组合说明" in portfolio.summary, f"portfolio_result={portfolio}"
 
 
 def test_a_failing_allocation_runner_falls_back_to_the_specialist():
@@ -218,9 +219,9 @@ def test_a_failing_allocation_runner_falls_back_to_the_specialist():
     state = asyncio.run(run())
 
     assert state.next == ()
-    results = list(state.values.get("agent_results") or [])
-    contents = " ".join(str(r.get("content") or "") for r in results)
-    assert "组合说明" in contents, f"降级后应产出普通分支结果；agent_results={results}"
+    portfolio = state.values.get("portfolio_result")
+    assert isinstance(portfolio, PortfolioResult)
+    assert "组合说明" in portfolio.summary, f"降级后应产出普通分支结果；portfolio_result={portfolio}"
 
 
 def test_a_non_degradable_error_still_propagates():

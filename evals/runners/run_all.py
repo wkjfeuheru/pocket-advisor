@@ -34,12 +34,14 @@ def _run_offline() -> dict[str, Any]:
         clarification_offline_eval,
         fanout_benchmark,
         profile_gate_eval,
+        supervisor_v2_eval,
     )
 
     summary: dict[str, Any] = {}
     summary.update(_safe("profile_gate", profile_gate_eval.main))
     summary.update(_safe("clarification_offline", clarification_offline_eval.main))
     summary.update(_safe("fanout", fanout_benchmark.main))
+    summary.update(_safe("supervisor_v2", supervisor_v2_eval.main))
     return summary
 
 

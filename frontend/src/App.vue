@@ -229,7 +229,7 @@ onUnmounted(() => {
   flex: 1;
   min-height: 0;
   overflow: hidden;
-  background: var(--color-bg);
+  background: transparent;
 }
 
 .app-page {
@@ -245,15 +245,17 @@ onUnmounted(() => {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
-  padding: 24px 24px 48px;
+  padding: 28px 28px 48px;
 }
 .admin-page :deep(> *) {
-  max-width: 960px;
+  max-width: 1040px;
   margin: 0 auto;
 }
 
+/* 顶部栏：半透明象牙 + 模糊 + 细线分隔，滚动时保持可读。 */
 .app-header {
-  background: rgba(247, 247, 245, 0.96);
+  background: rgba(250, 248, 242, 0.85);
+  backdrop-filter: blur(10px);
   border-bottom: 1px solid var(--color-border);
   position: relative;
   z-index: 100;
@@ -263,16 +265,16 @@ onUnmounted(() => {
 .header-inner {
   display: flex;
   align-items: center;
-  gap: 16px;
-  padding: 0 24px;
-  height: 64px;
+  gap: 18px;
+  padding: 0 26px;
+  height: 66px;
   max-width: 100%;
 }
 
 .brand {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 12px;
   min-width: 0;
 }
 
@@ -280,42 +282,66 @@ onUnmounted(() => {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 34px;
-  height: 34px;
-  border-radius: 0;
-  background: var(--color-primary);
+  width: 38px;
+  height: 38px;
+  border-radius: 10px;
+  background: linear-gradient(150deg, var(--color-primary-light), var(--color-primary));
   color: #fff;
   font-weight: 800;
-  font-size: 18px;
+  font-size: 19px;
+  box-shadow: var(--shadow-sm), inset 0 0 0 1px rgba(255, 255, 255, 0.1);
 }
 
 .brand-copy { display: flex; flex-direction: column; line-height: 1.15; min-width: 0; }
-.brand-copy .app-title { margin: 0; color: var(--color-text); }
-.brand-meta { margin-top: 4px; color: var(--color-text-secondary); font: 11px/1 var(--font-mono); letter-spacing: .1em; white-space: nowrap; }
+/* 字号放在低特异性规则里，好让下面的窄屏媒体查询可以覆盖它。 */
+.app-title {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: 18px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+.brand-copy .app-title {
+  color: var(--color-primary);
+}
+.brand-meta {
+  margin-top: 4px;
+  color: var(--color-text-muted);
+  font: 10px/1 var(--font-mono);
+  letter-spacing: 0.18em;
+  white-space: nowrap;
+}
 
-/* 主导航：文字按钮 + 下划线激活态，与整体技术极简风格一致 */
+/* 主导航：文字按钮 + 金铜下划线激活态，与编辑部气质一致 */
 .app-nav {
   display: flex;
   align-items: center;
-  gap: 4px;
-  margin-left: 12px;
+  gap: 2px;
+  margin-left: 14px;
 }
 
 .nav-link {
+  position: relative;
   border: 0;
   background: transparent;
-  padding: 8px 12px;
+  padding: 9px 14px;
   color: var(--color-text-secondary);
   font-size: 13px;
   cursor: pointer;
-  border-bottom: 2px solid transparent;
-  transition: color .16s ease, border-color .16s ease;
+  border-radius: var(--radius);
+  transition: color 0.16s ease, background 0.16s ease;
 }
-.nav-link:hover { color: var(--color-primary); }
-.nav-link.active {
-  color: var(--color-primary);
-  border-bottom-color: var(--color-primary);
-  font-weight: 600;
+.nav-link:hover { color: var(--color-primary); background: var(--color-primary-soft); }
+.nav-link.active { color: var(--color-primary); font-weight: 600; }
+.nav-link.active::after {
+  content: '';
+  position: absolute;
+  left: 14px;
+  right: 14px;
+  bottom: 3px;
+  height: 2px;
+  border-radius: 2px;
+  background: var(--color-accent);
 }
 
 .header-right {
@@ -325,7 +351,13 @@ onUnmounted(() => {
   gap: 10px;
   min-width: 0;
 }
-.header-right :deep(.el-tag) { max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; border-radius: 2px; }
+.header-right :deep(.el-tag) {
+  max-width: 150px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  border-radius: var(--radius-sm);
+}
 
 .logout-btn {
   background: transparent;
@@ -333,13 +365,29 @@ onUnmounted(() => {
   color: var(--color-text-secondary);
 }
 .logout-btn:hover {
-  background: rgba(183, 68, 50, 0.08);
+  background: rgba(179, 68, 47, 0.08);
   color: var(--color-danger);
   border-color: var(--color-danger);
 }
 
-.system-status { display: inline-flex; align-items: center; gap: 7px; border: 1px solid var(--color-border); padding: 5px 10px; color: var(--color-text-secondary); font: 10px/1 var(--font-mono); letter-spacing: .08em; }
-.system-status i { width: 7px; height: 7px; background: var(--color-success); }
+.system-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  border: 1px solid var(--color-border);
+  border-radius: 999px;
+  padding: 5px 11px;
+  color: var(--color-text-secondary);
+  font: 10px/1 var(--font-mono);
+  letter-spacing: 0.1em;
+}
+.system-status i {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--color-success);
+  box-shadow: 0 0 0 3px rgba(44, 122, 83, 0.16);
+}
 
 /* 响应式：窄屏隐藏导航文字标签之外的元素，导航允许横向滚动 */
 @media (max-width: 768px) {

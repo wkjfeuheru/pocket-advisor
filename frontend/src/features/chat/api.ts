@@ -36,6 +36,7 @@ export interface RunRecord {
   request_id: string
   session_id: string
   status: string
+  graph_version?: string
   stage: string
   final_answer: string
   error_code: string
@@ -98,14 +99,17 @@ export async function consumeSse(
   })
   if (!response.ok) {
     let detail = '请求失败'
+    let code = ''
     try {
       const payload = await response.json()
-      detail = payload.detail || detail
+      detail = typeof payload.detail === 'string' ? payload.detail : payload.detail?.message || detail
+      code = payload.code || payload.detail?.code || ''
     } catch {
       detail = response.statusText || detail
     }
-    const error = new Error(detail) as Error & { status?: number }
+    const error = new Error(detail) as Error & { status?: number; code?: string }
     error.status = response.status
+    error.code = code
     throw error
   }
   const reader = response.body?.getReader()

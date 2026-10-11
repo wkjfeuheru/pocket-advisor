@@ -2,7 +2,8 @@
   "gates": [
     {"metric": "profile_gate.gate_accuracy", "operator": ">=", "value": 1.0, "label": "画像门禁准确率（离线确定性）"},
     {"metric": "clarification_offline.all_pass_rate", "operator": ">=", "value": 1.0, "label": "澄清确定性守卫全通过"},
-    {"metric": "fanout.four_domain_speedup", "operator": ">=", "value": 2.5, "label": "4 意图并发扇出加速比"}
+    {"metric": "fanout.four_domain_speedup", "operator": ">=", "value": 2.5, "label": "4 意图并发扇出加速比"},
+    {"metric": "supervisor_v2.all_pass_rate", "operator": ">=", "value": 1.0, "label": "v2 槽位继承、任务隔离、依赖与输出门禁"}
   ],
   "watch": [
     {"metric": "intent_routing.routing_accuracy", "operator": ">=", "value": 0.8, "label": "意图路由准确率（live）"},

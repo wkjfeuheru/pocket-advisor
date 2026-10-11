@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import AsyncIterator
 from uuid import UUID
@@ -27,25 +28,64 @@ from app.agents.runtime import get_agent_runtime
 
 router = APIRouter(prefix="/api/agents", tags=["advisor"])
 
+#: 空闲心跳间隔（秒）。长图执行期间可能长时间没有新事件，靠 SSE 注释行保活，
+#: 避免 nginx / 中间层按空闲超时切断连接。
+_HEARTBEAT_SECONDS = 15.0
+
 
 def _service():
     return get_agent_service()
 
 
 def _raise(exc: AdvisorServiceError) -> None:
+    if exc.code == "graph_version_changed":
+        raise HTTPException(status_code=exc.status_code, detail={"message": exc.detail, "code": exc.code}) from exc
     raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
 
 
 def _sse(events: AsyncIterator[dict]) -> StreamingResponse:
+    """把图事件流包装成 SSE，并在空闲时发送心跳注释行。
+
+    事件生产者放在独立任务里，消费者只对队列取元素做超时等待；超时只取消
+    ``queue.get()`` 这个普通协程，**不会**取消事件生成器，因此不会把一次心跳
+    误判成客户端断流（那会触发 ``play()`` 里的 client_disconnected 处理）。
+    """
+
     async def body() -> AsyncIterator[str]:
-        async for event in events:
-            payload = json.dumps(event["data"], ensure_ascii=False)
-            yield f"event: {event['event']}\ndata: {payload}\n\n"
+        queue: asyncio.Queue = asyncio.Queue()
+
+        async def pump() -> None:
+            try:
+                async for event in events:
+                    await queue.put(event)
+            finally:
+                await queue.put(None)
+
+        producer = asyncio.create_task(pump())
+        try:
+            while True:
+                try:
+                    item = await asyncio.wait_for(queue.get(), timeout=_HEARTBEAT_SECONDS)
+                except asyncio.TimeoutError:
+                    yield ": ping\n\n"
+                    continue
+                if item is None:
+                    break
+                payload = json.dumps(item["data"], ensure_ascii=False)
+                yield f"event: {item['event']}\ndata: {payload}\n\n"
+        finally:
+            # 客户端断流时（生成器被关闭）取消生产者，让事件生成器收到取消并落库。
+            if not producer.done():
+                producer.cancel()
 
     return StreamingResponse(
         body(),
         media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
     )
 
 

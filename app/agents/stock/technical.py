@@ -51,8 +51,26 @@ def _atr(bars: list[dict], window: int = 14) -> float | None:
     return sum(trs[-window:]) / window
 
 
+_REQUIRED_BAR_KEYS = ("close", "high", "low")
+
+
+def _usable_bars(bars: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """只保留可计算的 K 线：缺字段或非数值的行会让指标失真，直接剔除。"""
+    usable = []
+    for bar in bars:
+        if not isinstance(bar, dict):
+            continue
+        try:
+            [float(bar[key]) for key in _REQUIRED_BAR_KEYS]
+        except (KeyError, TypeError, ValueError):
+            continue
+        usable.append(bar)
+    return usable
+
+
 def compute_technicals(bars: list[dict[str, Any]]) -> dict[str, Any]:
-    if not bars or len(bars) < 20:
+    bars = _usable_bars(bars or [])
+    if len(bars) < 20:
         return {"status": "unavailable", "ma": {}, "macd": None, "rsi": None, "atr": None}
     closes = [float(bar["close"]) for bar in bars]
     volumes = [float(bar.get("volume") or 0) for bar in bars]

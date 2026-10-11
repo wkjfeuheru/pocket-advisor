@@ -12,6 +12,7 @@ runner 捕获后输出 SKIP 状态而不是失败。
 from __future__ import annotations
 
 from typing import Any
+from uuid import uuid4
 
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.types import Command
@@ -59,11 +60,14 @@ class LiveHarness:
                                    "budget_amount": 10000}
         self.interrupts: list[dict[str, Any]] = []
         self.checkpointer = MemorySaver()
+        self._contexts: dict[str, dict] = {}
+        self._history: dict[str, list] = {}
+        self._configs: dict[str, dict] = {}
         self._graph = build_advisor_graph(
             model=self.model,
             specialists=self._specialists(),
             checkpointer=self.checkpointer,
-            risk_of=FakeProductLibrary().query_by_code,
+            risk_of=lambda code: int(FakeProductLibrary().query_by_code(code)["basic_info"]["risk_level"][1:]) if FakeProductLibrary().query_by_code(code) else None,
         )
 
     def _specialists(self) -> dict[str, Any]:
@@ -76,36 +80,42 @@ class LiveHarness:
 
     async def send(self, message: str, *, thread_id: str) -> dict[str, Any]:
         """跑一轮并返回观测结果：intents / resolved_task / interrupt / final_result。"""
-        config = {"configurable": {"thread_id": thread_id}}
-        await self._graph.ainvoke(
-            {"messages": [{"role": "user", "content": message}], "profile_snapshot": dict(self.profile)},
-            config,
-            durability="sync",
-        )
-        return await self._observe(thread_id)
+        history = self._history.setdefault(thread_id, [])
+        history.append({"id": str(uuid4()), "role": "user", "content": message})
+        return await self.send_messages(history, thread_id=thread_id)
 
     async def send_messages(self, messages: list[dict[str, str]], *, thread_id: str) -> dict[str, Any]:
-        config = {"configurable": {"thread_id": thread_id}}
+        from app.agents.graphs.state import checkpoint_thread_id
+        request_id = str(uuid4())
+        config = {"configurable": {"thread_id": checkpoint_thread_id(thread_id, request_id),
+                                   "session_id": thread_id, "request_id": request_id,
+                                   "verified_profile": dict(self.profile)}}
+        self._configs[thread_id] = config
         await self._graph.ainvoke(
-            {"messages": list(messages), "profile_snapshot": dict(self.profile)},
+            {"messages": list(messages), "profile_snapshot": dict(self.profile),
+             "session_context": self._contexts.get(thread_id, {}), "user_query": messages[-1]["content"]},
             config,
             durability="sync",
         )
         return await self._observe(thread_id)
 
     async def resume(self, answer: dict[str, Any] | Any, *, thread_id: str) -> dict[str, Any]:
-        config = {"configurable": {"thread_id": thread_id}}
+        config = self._configs[thread_id]
+        if isinstance(answer, dict) and "risk_level" in answer:
+            self.profile.update(answer)
+            config["configurable"]["verified_profile"] = dict(self.profile)
         await self._graph.ainvoke(Command(resume=answer), config, durability="sync")
         return await self._observe(thread_id)
 
     async def _observe(self, thread_id: str) -> dict[str, Any]:
-        snapshot = await self._graph.aget_state({"configurable": {"thread_id": thread_id}})
+        snapshot = await self._graph.aget_state(self._configs[thread_id])
         values = getattr(snapshot, "values", None) or {}
+        self._contexts[thread_id] = values.get("session_context") or {}
         payload: dict[str, Any] = {
-            "intents": [dict(item) if hasattr(item, "model_dump") else dict(item)
+            "intents": [item.model_dump() if hasattr(item, "model_dump") else dict(item)
                         for item in values.get("intents") or []],
             "resolved_task": str(values.get("resolved_task") or ""),
-            "final_result": str(values.get("final_result") or ""),
+            "final_result": str(getattr(values.get("final"), "answer", "") or ""),
             "interrupt": None,
         }
         direct = getattr(snapshot, "interrupts", None) or ()

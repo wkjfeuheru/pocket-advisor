@@ -89,12 +89,9 @@ def test_build_stock_agent_uses_create_agent_with_limits_and_structured_response
     assert "equity_research" in captured["system_prompt"]
     assert "stock_screening" in captured["system_prompt"]
     limits = [item for item in captured["middleware"] if item.__class__.__name__ == "ToolCallLimitMiddleware"]
-    assert any(item.tool_name is None and item.run_limit == 12 for item in limits)
-    assert {item.tool_name for item in limits if item.tool_name} == {
-        "fuyao_a_share_get_quote",
-        "calculate_technical_indicators",
-    }
-    assert all(item.run_limit == 3 for item in limits if item.tool_name)
+    assert [(item.tool_name, item.run_limit, item.exit_behavior) for item in limits] == [(None, 20, "end")]
+    model_limits = [item for item in captured["middleware"] if item.__class__.__name__ == "ModelCallLimitMiddleware"]
+    assert [(item.run_limit, item.exit_behavior) for item in model_limits] == [(20, "end")]
 
 
 def test_mcp_result_is_persisted_and_model_only_receives_compact_handle():
@@ -321,18 +318,19 @@ def test_server_assembles_artifact_from_evidence_and_suppresses_unsupported_numb
         evidence_ids=[market["id"]], evidence_quality="ok", failed=False,
     )
     rendered = assemble_stock_result(response, _context(), store)
-    assert rendered["artifacts"][0]["market_overview"]["indices"][0]["last"] == 3200.0
-    assert "9999" not in rendered["content"]
+    assert rendered.result is not None
+    assert rendered.result.market_overview["indices"][0]["last"] == 3200.0
+    assert "9999" not in rendered.summary
 
     unsupported = StockAgentResponse(
         scenario="market_overview", summary="上证指数 9999 点",
         evidence_ids=[], evidence_quality="ok", failed=False,
     )
     degraded = assemble_stock_result(unsupported, _context(), store)
-    assert degraded["artifacts"] == []
-    assert degraded["candidate_stocks"] == []
-    assert degraded["failed"] is False
-    assert "9999" not in degraded["content"]
+    assert degraded.result is None
+    assert degraded.candidates == []
+    assert degraded.status == "degraded"
+    assert "9999" not in degraded.summary
 
 
 @pytest.mark.parametrize(
@@ -374,10 +372,10 @@ def test_unusable_evidence_returns_a_nonfatal_generic_answer(scenario, evidence_
         failed=True,
     ), _context(), store)
 
-    assert result["failed"] is False
-    assert result["artifacts"] == []
-    assert result["candidate_stocks"] == []
-    assert "个股结论" not in result["content"]
+    assert result.status == "degraded"
+    assert result.result is None
+    assert result.candidates == []
+    assert "个股结论" not in result.summary
 
 
 def test_fundamental_tool_rejects_mixed_symbols():
@@ -402,26 +400,21 @@ def test_fundamental_tool_rejects_mixed_symbols():
         reset_stock_execution(token)
 
 
-def test_clarification_tool_versions_interrupt_payload(monkeypatch):
+def test_clarification_tool_versions_typed_clarification_payload():
     from app.agents.stock import tools as stock_tools
     from app.agents.stock.evidence_store import MemoryAgentEvidenceStore
 
-    seen = {}
-
-    def fake_interrupt(payload):
-        seen.update(payload)
-        return {"strategy": "value_quality"}
-
-    monkeypatch.setattr(stock_tools, "interrupt", fake_interrupt)
+    from app.agents.evidence import NeedsClarification
     tools = {item.name: item for item in stock_tools.build_stock_local_tools(store=MemoryAgentEvidenceStore())}
-    answer = tools["request_stock_clarification"].invoke({
-        "reason": "missing_strategy",
-        "question": "请选择策略",
-        "fields": ["strategy"],
-        "options": [{"field": "strategy", "id": "value_quality", "label": "价值质量"}],
-    })
+    with pytest.raises(NeedsClarification) as caught:
+        tools["request_stock_clarification"].invoke({
+            "reason": "missing_strategy",
+            "question": "请选择策略",
+            "fields": ["strategy"],
+            "options": [{"field": "strategy", "id": "value_quality", "label": "价值质量"}],
+        })
+    seen = caught.value.payload
 
     assert seen["agent_version"] == "stock-react-v1"
     assert seen["kind"] == "clarification"
     assert seen["options"][0]["field"] == "strategy"
-    assert answer == {"strategy": "value_quality"}

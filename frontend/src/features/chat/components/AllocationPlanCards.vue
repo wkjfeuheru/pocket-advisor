@@ -123,25 +123,51 @@ function actionClass(action: string): string {
 
 <style scoped>
 .allocation-plans { display: flex; flex-direction: column; gap: 12px; }
-.plan-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 12px; }
-.plan-card { border: 1px solid #e4e7ed; border-radius: 8px; padding: 12px; background: #fff; }
-.plan-head { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 8px; }
-.plan-tier { font-weight: 600; }
-.plan-adopt { margin-top: 12px; }
-.plan-turnover { color: #606266; font-size: 12px; }
-.plan-metrics { display: flex; gap: 16px; margin: 0 0 8px; }
-.plan-metrics dt { color: #909399; font-size: 12px; }
-.plan-metrics dd { margin: 0; font-variant-numeric: tabular-nums; }
-.plan-summary { color: #606266; font-size: 13px; margin: 0 0 8px; }
-.plan-items { width: 100%; border-collapse: collapse; font-size: 12px; }
-.plan-items th { text-align: left; color: #909399; font-weight: 400; padding: 4px 6px; border-bottom: 1px solid #ebeef5; }
-.plan-items td { padding: 4px 6px; border-bottom: 1px solid #f5f7fa; }
-.plan-items .code { font-variant-numeric: tabular-nums; }
-.plan-items .reason { color: #606266; }
-.is-buy { color: #c45656; }
-.is-sell { color: #529b2e; }
-.is-hold { color: #909399; }
-.plan-limits { margin: 8px 0 0; padding-left: 16px; color: #909399; font-size: 12px; }
-.plan-unavailable { margin: 0; padding-left: 16px; color: #909399; font-size: 12px; }
-.plan-empty { color: #909399; font-size: 13px; margin: 0; }
+.plan-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 14px; }
+.plan-card {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  padding: 14px 16px;
+  background: var(--color-surface);
+  box-shadow: var(--shadow-sm);
+}
+.plan-head { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 10px; }
+.plan-tier { font-family: var(--font-display); font-size: 16px; font-weight: 600; color: var(--color-primary); }
+.plan-turnover { color: var(--color-text-secondary); font-size: 12px; font-variant-numeric: tabular-nums; }
+.plan-metrics { display: flex; gap: 20px; margin: 0 0 10px; }
+.plan-metrics dt { color: var(--color-text-muted); font-size: 11px; }
+.plan-metrics dd { margin: 0; font-variant-numeric: tabular-nums; font-weight: 600; }
+.plan-summary { color: var(--color-text-secondary); font-size: 13px; margin: 0 0 10px; }
+.plan-items { width: 100%; border-collapse: collapse; font-size: 12px; font-variant-numeric: tabular-nums; }
+.plan-items th {
+  text-align: left;
+  color: var(--color-text-muted);
+  font-weight: 600;
+  padding: 6px;
+  border-bottom: 1px solid var(--color-hairline);
+}
+.plan-items td { padding: 6px; border-bottom: 1px solid var(--color-hairline); }
+.plan-items .code { font-variant-numeric: tabular-nums; color: var(--color-text); }
+.plan-items .reason { color: var(--color-text-secondary); }
+/* 买入/加仓用红、卖出/减仓用绿，沿用 A 股配色习惯。 */
+.is-buy { color: var(--color-danger); font-weight: 600; }
+.is-sell { color: var(--color-success); font-weight: 600; }
+.is-hold { color: var(--color-text-secondary); }
+.plan-limits { margin: 8px 0 0; padding-left: 1.1em; color: var(--color-text-muted); font-size: 12px; }
+.plan-unavailable { margin: 0; padding-left: 1.1em; color: var(--color-text-muted); font-size: 12px; }
+.plan-empty { color: var(--color-text-muted); font-size: 13px; margin: 0; }
+.plan-adopt {
+  margin-top: auto;
+  align-self: flex-start;
+  border: 1px solid var(--color-primary);
+  border-radius: var(--radius);
+  background: var(--color-primary);
+  color: #fff;
+  padding: 9px 16px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.plan-adopt:disabled { opacity: 0.5; cursor: not-allowed; }
 </style>

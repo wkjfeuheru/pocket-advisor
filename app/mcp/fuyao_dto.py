@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 from typing import Any
 
 _SPECS: dict[str, dict[str, tuple[str, ...]]] = {
@@ -29,14 +31,18 @@ _SPECS: dict[str, dict[str, tuple[str, ...]]] = {
         "name": ("name", "ticker"),
         "last": ("last", "price", "close", "last_price"),
         "change_pct": ("change_pct", "pct_chg", "price_change_ratio_pct"),
+        "turnover": ("turnover", "amount"),
+        "volume": ("volume", "vol"),
         "as_of": ("as_of", "update_time", "timestamp"),
     },
     "kline": {
-        "close": ("close",),
-        "high": ("high",),
-        "low": ("low",),
+        "close": ("close", "close_price"),
+        "high": ("high", "high_price"),
+        "low": ("low", "low_price"),
+        "open": ("open", "open_price"),
         "volume": ("volume", "vol"),
-        "as_of": ("as_of", "trade_date", "update_time"),
+        "turnover": ("turnover",),
+        "as_of": ("as_of", "trade_date", "date", "date_ms", "timestamp", "update_time"),
     },
     "financials": {
         "revenue_trend": ("revenue_trend",),
@@ -51,10 +57,11 @@ _SPECS: dict[str, dict[str, tuple[str, ...]]] = {
         "as_of": ("as_of", "end_date", "update_time"),
     },
     "valuation": {
-        "pe": ("pe",),
-        "pb": ("pb",),
+        "pe": ("pe", "pe_ttm", "pe_mrq"),
+        "pb": ("pb", "pb_mrq"),
+        "ps": ("ps_ttm",),
         "industry_percentile": ("industry_percentile",),
-        "as_of": ("as_of", "update_time"),
+        "as_of": ("as_of", "update_time", "timestamp"),
     },
     "market_breadth": {
         "up": ("up",),
@@ -73,7 +80,7 @@ _SPECS: dict[str, dict[str, tuple[str, ...]]] = {
         "as_of": ("as_of", "update_time"),
     },
     "trade_calendar": {
-        "trade_date": ("trade_date",),
+        "trade_date": ("trade_date", "calendar_date", "date", "date_ms"),
         "session": ("session", "is_open"),
         "as_of": ("as_of", "update_time"),
     },
@@ -88,6 +95,55 @@ _SPECS: dict[str, dict[str, tuple[str, ...]]] = {
 # 上游常用「列表装在信封里」的返回形状。目录类操作必须保留这些行，
 # 否则实体解析拿不到任何股票/指数/行业。
 _LIST_ENVELOPE_KEYS = ("items", "data", "list", "records", "rows")
+
+# Fuyao 财务指标以 ``abilities[].indicators[].{index_id,value}`` 返回，
+# 这里按下游分析工具消费的语义字段做一次显式映射。
+_ABILITY_INDICATORS: dict[str, tuple[str, ...]] = {
+    "roe": ("index_weighted_avg_roe", "index_deduct_weighted_avg_roe"),
+    "gross_margin": ("sale_gross_margin",),
+    "net_margin": ("sale_net_interest_ratio",),
+    "leverage": ("assets_debt_ratio",),
+    "revenue_trend": ("calculate_operating_income_yoy_growth_ratio",),
+    "profit_trend": ("calculate_parent_holder_net_profit_yoy_growth_ratio",),
+    "operating_profit_trend": ("calculate_operating_profit_yoy_growth_ratio",),
+}
+
+
+def _as_iso(value: Any, *, date_only: bool = False) -> Any:
+    """区分业务日期与带时刻的快照截止时间，不丢失盘中精度。"""
+    text = str(value if value is not None else "").strip()
+    if text.isdigit() and len(text) == 8:
+        try:
+            return datetime.strptime(text, "%Y%m%d").date().isoformat()
+        except ValueError:
+            return value
+    if text.isdigit() and 10 <= len(text) <= 13:
+        try:
+            stamp = datetime.fromtimestamp(int(text) / (1000 if len(text) == 13 else 1), tz=timezone.utc).astimezone(ZoneInfo("Asia/Shanghai"))
+            return stamp.date().isoformat() if date_only else stamp.isoformat()
+        except (OverflowError, OSError, ValueError):
+            return value
+    return value
+
+
+def _normalize_financials(payload: dict[str, Any]) -> dict[str, Any]:
+    """展平 Fuyao 财务指标的 abilities/indicators 结构，只保留可核验字段。"""
+    data = payload.get("data")
+    data = data if isinstance(data, dict) else payload
+    indicators: dict[str, Any] = {}
+    for ability in data.get("abilities") or []:
+        if not isinstance(ability, dict):
+            continue
+        for item in ability.get("indicators") or []:
+            if isinstance(item, dict) and item.get("index_id"):
+                indicators[str(item["index_id"])] = item.get("value")
+    mapped: dict[str, Any] = {"source": str(payload.get("source") or "fuyao")}
+    for target, names in _ABILITY_INDICATORS.items():
+        value = next((indicators[name] for name in names if indicators.get(name) is not None), None)
+        if value is not None:
+            mapped[target] = value
+    mapped["as_of"] = _as_iso(data.get("report") or data.get("timestamp") or "")
+    return mapped
 
 
 def _pick(payload: dict[str, Any], aliases: tuple[str, ...]) -> Any:
@@ -114,6 +170,8 @@ def _members(payload: dict[str, Any]) -> dict[str, Any]:
 def normalize_payload(operation: str, payload: Any) -> Any:
     if payload is None:
         return None
+    if isinstance(payload, dict) and "message" in payload and "code" in payload and str(payload["code"]) not in {"0", "200", ""}:
+        return {"failed": True, "warning": "upstream_data_unavailable", "source": "fuyao", "as_of": ""}
     if operation == "index_members" and isinstance(payload, dict):
         return _members(payload)
     if isinstance(payload, list):
@@ -144,6 +202,11 @@ def normalize_payload(operation: str, payload: Any) -> Any:
         ]
     if not isinstance(payload, dict):
         return None
+    if operation == "financials":
+        inner = payload.get("data")
+        source = inner if isinstance(inner, dict) else payload
+        if isinstance(source.get("abilities"), list):
+            return _normalize_financials(payload)
     data = payload.get("data")
     if isinstance(data, dict):
         rows = data.get("item")
@@ -165,7 +228,7 @@ def normalize_payload(operation: str, payload: Any) -> Any:
     for target, aliases in spec.items():
         value = _pick(payload, aliases)
         if value is not None:
-            mapped[target] = value
+            mapped[target] = _as_iso(value, date_only=target == "trade_date" or operation == "kline") if target in {"as_of", "trade_date"} else value
     mapped.setdefault("as_of", "")
     return mapped
 

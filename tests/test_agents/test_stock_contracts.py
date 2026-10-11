@@ -1,11 +1,9 @@
-"""股票请求/结果契约，以及 AgentResult 与商品推荐字段分离。"""
+"""股票请求/结果契约，以及结构化 worker 结果与商品推荐字段分离。"""
 
 from __future__ import annotations
 
 import pytest
 from pydantic import ValidationError
-
-from app.agents.graphs.state import empty_result
 
 
 def test_stock_request_accepts_three_scenarios_and_defaults():
@@ -64,12 +62,18 @@ def test_stock_result_v1_has_public_fields_and_one_scenario_block():
     assert dumped["stock_screening"] is None
 
 
-def test_empty_result_separates_stock_candidates_from_product_codes():
-    payload = empty_result("stock_agent", "行情暂不可用", source="fuyao")
-    assert payload["recommended_product_codes"] == []
-    assert payload["candidate_stocks"] == []
-    assert payload["artifacts"] == []
-    assert payload["failed"] is True
+def test_worker_failure_separates_stock_candidates_from_product_codes():
+    from app.agents.graphs.state import ProductResult, StockResult, worker_failure
+
+    stock = worker_failure("stock_agent", "行情暂不可用", source="fuyao")
+    assert isinstance(stock, StockResult)
+    assert stock.status == "failed"
+    assert stock.result is None
+    assert stock.candidates == []
+
+    product = worker_failure("product_agent", "商品暂不可用")
+    assert isinstance(product, ProductResult)
+    assert product.recommended_codes == []
 
 
 def test_stock_agent_response_forbids_unknown_fields():

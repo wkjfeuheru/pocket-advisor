@@ -3,6 +3,7 @@ import { ref, reactive, computed } from 'vue'
 import { ElMessage } from 'element-plus'
 import { User, Lock, EditPen } from '@element-plus/icons-vue'
 import { login, register } from '@/features/auth/api'
+import { apiErrorMessage } from '@/api/errors'
 import { saveUser } from '@/app/session'
 import type { UserInfo } from '@/features/auth/types'
 
@@ -88,8 +89,7 @@ async function handleLogin() {
     ElMessage.success(`欢迎回来，${user.display_name}！`)
     emit('logged-in', user)
   } catch (err: any) {
-    const detail = err?.response?.data?.detail || err?.message || '登录失败'
-    ElMessage.error(detail)
+    ElMessage.error(apiErrorMessage(err, '登录失败'))
   } finally {
     submitting.value = false
   }
@@ -117,8 +117,7 @@ async function handleRegister() {
     registerForm.password = ''
     registerForm.confirmPassword = ''
   } catch (err: any) {
-    const detail = err?.response?.data?.detail || err?.message || '注册失败'
-    ElMessage.error(detail)
+    ElMessage.error(apiErrorMessage(err, '注册失败'))
   } finally {
     submitting.value = false
   }
@@ -133,7 +132,7 @@ function switchTab(tab: TabKey) {
 <template>
   <div class="login-view">
     <div class="login-bg"></div>
-    <section class="trust-panel">
+    <section class="trust-panel rise-in">
       <div class="trust-brand"><span>¥</span> FINANCE AGENT / 01</div>
       <h1>让每一次投资决策<br />都有清晰依据。</h1>
       <p>多 Agent 协作完成行情研究、标的筛选、风险画像与资产配置。</p>
@@ -145,7 +144,7 @@ function switchTab(tab: TabKey) {
       </div>
       <div class="trust-status"><i></i> 服务状态正常 · 数据安全连接</div>
     </section>
-    <div class="login-card">
+    <div class="login-card rise-in">
       <div class="brand-row">
         <div class="brand-mark">¥</div>
         <div class="brand-text">
@@ -293,65 +292,149 @@ function switchTab(tab: TabKey) {
   overflow: hidden;
 }
 
+/* 细网格纸底 + 双角渐晕，营造"研究纸张"氛围 */
 .login-bg {
   position: absolute;
   inset: 0;
   background-color: var(--color-bg);
-  background-image: linear-gradient(var(--color-border) 1px, transparent 1px), linear-gradient(90deg, var(--color-border) 1px, transparent 1px);
-  background-size: 96px 96px;
+  background-image:
+    linear-gradient(var(--grid-line) 1px, transparent 1px),
+    linear-gradient(90deg, var(--grid-line) 1px, transparent 1px);
+  background-size: 88px 88px;
 }
 .login-bg::before {
   content: '';
   position: absolute;
   inset: 0;
-  background: linear-gradient(90deg, rgba(26,60,43,.035), transparent 45%, rgba(244,211,94,.08));
+  background:
+    radial-gradient(circle at 12% 8%, rgba(185, 137, 63, 0.12), transparent 46%),
+    radial-gradient(circle at 88% 92%, rgba(23, 54, 42, 0.1), transparent 50%);
 }
 
-.trust-panel { position: relative; z-index: 1; width: min(52%, 720px); padding: clamp(48px, 8vw, 120px); display: flex; flex-direction: column; justify-content: center; border-right: 1px solid var(--color-border); }
-.trust-brand { color: var(--color-primary); font: 11px/1 var(--font-mono); letter-spacing: .12em; }
-.trust-brand span { display: inline-flex; width: 28px; height: 28px; align-items: center; justify-content: center; margin-right: 10px; background: var(--color-primary); color: #fff; font: 700 15px/1 sans-serif; }
-.trust-panel h1 { margin: 56px 0 24px; color: var(--color-primary); font-size: clamp(40px, 5vw, 72px); line-height: 1.03; letter-spacing: -.05em; }
-.trust-panel > p { max-width: 540px; margin: 0; color: var(--color-text-secondary); font-size: 16px; line-height: 1.9; }
-.capability-grid { display: grid; grid-template-columns: repeat(2, 1fr); margin-top: 56px; border-top: 1px solid var(--color-border); border-left: 1px solid var(--color-border); }
-.capability-grid div { display: flex; flex-direction: column; gap: 12px; padding: 20px; border-right: 1px solid var(--color-border); border-bottom: 1px solid var(--color-border); background: rgba(255,255,255,.45); }
-.capability-grid b { color: var(--color-text-muted); font: 10px/1 var(--font-mono); }
-.capability-grid span { color: var(--color-text); font-weight: 600; }
-.trust-status { margin-top: auto; padding-top: 40px; color: var(--color-text-muted); font: 10px/1 var(--font-mono); letter-spacing: .08em; }
-.trust-status i { display: inline-block; width: 7px; height: 7px; margin-right: 8px; background: var(--color-success); }
+.trust-panel {
+  position: relative;
+  z-index: 1;
+  width: min(54%, 760px);
+  padding: clamp(48px, 8vw, 120px);
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  border-right: 1px solid var(--color-border);
+}
+.trust-brand {
+  display: flex;
+  align-items: center;
+  color: var(--color-primary);
+  font: 11px/1 var(--font-mono);
+  letter-spacing: 0.18em;
+}
+.trust-brand span {
+  display: inline-flex;
+  width: 30px;
+  height: 30px;
+  align-items: center;
+  justify-content: center;
+  margin-right: 12px;
+  border-radius: 8px;
+  background: linear-gradient(150deg, var(--color-primary-light), var(--color-primary));
+  color: #fff;
+  font: 700 15px/1 var(--font-display);
+}
+.trust-panel h1 {
+  margin: 56px 0 24px;
+  font-family: var(--font-display);
+  color: var(--color-primary);
+  font-size: clamp(38px, 4.6vw, 68px);
+  line-height: 1.08;
+  letter-spacing: -0.01em;
+  font-weight: 600;
+}
+.trust-panel > p {
+  max-width: 540px;
+  margin: 0;
+  color: var(--color-text-secondary);
+  font-size: 16px;
+  line-height: 1.9;
+}
+.capability-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  margin-top: 56px;
+  border-top: 1px solid var(--color-border);
+  border-left: 1px solid var(--color-border);
+}
+.capability-grid div {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 22px;
+  border-right: 1px solid var(--color-border);
+  border-bottom: 1px solid var(--color-border);
+  background: rgba(255, 254, 251, 0.55);
+  transition: background 0.2s ease, transform 0.2s ease;
+}
+.capability-grid div:hover {
+  background: var(--color-surface);
+  transform: translateY(-2px);
+}
+.capability-grid b {
+  color: var(--color-accent);
+  font: 11px/1 var(--font-mono);
+  letter-spacing: 0.1em;
+}
+.capability-grid span {
+  color: var(--color-text);
+  font-weight: 600;
+}
+.trust-status {
+  margin-top: auto;
+  padding-top: 40px;
+  color: var(--color-text-muted);
+  font: 10px/1 var(--font-mono);
+  letter-spacing: 0.12em;
+}
+.trust-status i {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  margin-right: 8px;
+  background: var(--color-success);
+  box-shadow: 0 0 0 3px rgba(44, 122, 83, 0.16);
+}
 
 .login-card {
   position: relative;
   z-index: 1;
-  width: 100%;
   align-self: center;
+  width: 100%;
   max-width: 440px;
   background: var(--color-surface);
   border: 1px solid var(--color-border);
-  border-radius: 0;
-  box-shadow: none;
-  padding: 40px;
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-lg);
+  padding: 42px 40px;
   margin: 40px clamp(28px, 6vw, 96px);
 }
 
 .brand-row {
   display: flex;
   align-items: center;
-  gap: 12px;
-  margin-bottom: 24px;
+  gap: 14px;
+  margin-bottom: 26px;
 }
 
 .brand-mark {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 44px;
-  height: 44px;
-  border-radius: 0;
-  background: var(--color-primary);
+  width: 46px;
+  height: 46px;
+  border-radius: 12px;
+  background: linear-gradient(150deg, var(--color-primary-light), var(--color-primary));
   color: #fff;
-  font-weight: 800;
-  font-size: 22px;
-  box-shadow: none;
+  font: 800 22px/1 var(--font-display);
+  box-shadow: var(--shadow-sm);
 }
 
 .brand-text {
@@ -361,39 +444,40 @@ function switchTab(tab: TabKey) {
 
 .brand-title {
   margin: 0;
-  font-size: 18px;
-  font-weight: 700;
-  color: var(--color-text);
-  letter-spacing: 0.5px;
+  font-family: var(--font-display);
+  font-size: 19px;
+  font-weight: 600;
+  color: var(--color-primary);
+  letter-spacing: 0.02em;
 }
 
 .brand-sub {
-  margin: 2px 0 0;
+  margin: 3px 0 0;
   font-size: 12px;
   color: var(--color-text-muted);
 }
 
 .tabs {
   display: flex;
+  gap: 3px;
   background: var(--color-surface-alt);
   border: 1px solid var(--color-border);
-  border-radius: 0;
-  padding: 0;
-  margin-bottom: 20px;
+  border-radius: var(--radius);
+  padding: 3px;
+  margin-bottom: 22px;
 }
 
 .tab {
   flex: 1;
   border: none;
   background: transparent;
-  padding: 8px 12px;
-  border-radius: 0;
-  border-right: 1px solid var(--color-border);
+  padding: 9px 12px;
+  border-radius: var(--radius-sm);
   cursor: pointer;
   font-size: 14px;
-  font-weight: 500;
+  font-weight: 600;
   color: var(--color-text-secondary);
-  transition: all 0.2s ease;
+  transition: all 0.18s ease;
 }
 
 .tab:hover {
@@ -401,10 +485,9 @@ function switchTab(tab: TabKey) {
 }
 
 .tab.active {
-  background: var(--color-primary);
-  color: #fff;
-  box-shadow: none;
-  font-weight: 600;
+  background: var(--color-surface);
+  color: var(--color-primary);
+  box-shadow: var(--shadow-sm);
 }
 
 .form-header {
@@ -413,24 +496,25 @@ function switchTab(tab: TabKey) {
 
 .form-title {
   margin: 0;
-  font-size: 20px;
-  font-weight: 700;
-  color: var(--color-text);
+  font-family: var(--font-display);
+  font-size: 22px;
+  font-weight: 600;
+  color: var(--color-primary);
 }
 
 .form-subtitle {
-  margin: 4px 0 0;
+  margin: 5px 0 0;
   font-size: 13px;
   color: var(--color-text-muted);
 }
 
 .submit-btn {
   width: 100%;
-  height: 42px;
+  height: 44px;
   font-size: 15px;
   font-weight: 600;
   margin-top: 6px;
-  border-radius: 2px;
+  border-radius: var(--radius);
 }
 
 .hint {
@@ -443,7 +527,7 @@ function switchTab(tab: TabKey) {
 .hint a {
   color: var(--color-primary);
   text-decoration: none;
-  font-weight: 500;
+  font-weight: 600;
 }
 .hint a:hover {
   text-decoration: underline;
@@ -452,18 +536,12 @@ function switchTab(tab: TabKey) {
 @media (max-width: 900px) {
   .login-view { padding: 24px; }
   .trust-panel { display: none; }
-  .login-card {
-    margin: 0;
-  }
+  .login-card { margin: 0; }
 }
 
 @media (max-width: 480px) {
   .login-view { padding: 20px; }
-  .login-card {
-    padding: 28px 20px 20px;
-  }
-  .brand-title {
-    font-size: 16px;
-  }
+  .login-card { padding: 30px 22px 22px; }
+  .brand-title { font-size: 17px; }
 }
 </style>

@@ -38,6 +38,7 @@ export interface RunSnapshot {
   request_id?: string
   session_id?: string
   status: string
+  graph_version?: string
   stage?: string
   final_answer?: string
   retryable?: boolean
@@ -210,6 +211,7 @@ export function reduceTurn(state: TurnState, event: SseEvent): TurnState {
     return { ...state, status: 'completed', answer: data.answer || state.answer, stage: '完成' }
   }
   if (event.event === 'error') {
+    if (data.code === 'graph_version_changed') return versionChanged(state)
     return { ...state, status: 'failed', retryable: Boolean(data.retryable), errorCode: data.code || 'turn_failed' }
   }
   return state
@@ -231,12 +233,13 @@ export function applyRunSnapshot(state: TurnState, run: RunSnapshot): TurnState 
       retryable: false,
     }
   }
-  if (run.status === 'failed' && run.retryable) {
+  if (run.error_code === 'graph_version_changed') return versionChanged(recovered)
+  if (run.status === 'failed') {
     return {
       ...recovered,
       status: 'failed',
       stage: run.stage || '失败',
-      retryable: true,
+      retryable: Boolean(run.retryable),
       errorCode: run.error_code || state.errorCode,
     }
   }
@@ -287,6 +290,16 @@ export function applyRunSnapshot(state: TurnState, run: RunSnapshot): TurnState 
 
 export function missingProfileFields(missing: string[]) {
   return PROFILE_FIELDS.filter((field) => missing.includes(field.id))
+}
+
+function versionChanged(state: TurnState): TurnState {
+  return { ...state, status: 'failed', stage: '请重新发送', retryable: false,
+    errorCode: 'graph_version_changed', missingFields: [], clarification: null, allocationPlans: [] }
+}
+
+export function turnErrorMessage(state: TurnState): string {
+  return state.errorCode === 'graph_version_changed'
+    ? '投顾已更新，请在输入框重新发送问题。' : '本轮没有完成。'
 }
 
 export function newConversationState(): TurnState {

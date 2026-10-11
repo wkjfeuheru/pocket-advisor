@@ -20,6 +20,7 @@ from sqlalchemy import (
     Date,
     DateTime,
     Float,
+    ForeignKey,
     String,
     Text,
     func,
@@ -63,6 +64,7 @@ class AllocationPlan(Base):
     customer_id: Mapped[str] = mapped_column(String(64), nullable=False)
     request_id: Mapped[Optional[str]] = mapped_column(UUID(as_uuid=False), nullable=True)
     session_id: Mapped[Optional[str]] = mapped_column(UUID(as_uuid=False), nullable=True)
+    task_id: Mapped[str] = mapped_column(String(128), nullable=False, default="", server_default="")
     tier: Mapped[str] = mapped_column(String(16), nullable=False)
     status: Mapped[str] = mapped_column(String(16), nullable=False, default="offered")
     turnover_rate: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
@@ -83,6 +85,20 @@ class AllocationPlan(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
+
+
+class AllocationGeneration(Base):
+    """已完整提交的任务生成快照；复合主键同时保护同键唯一。"""
+
+    __tablename__ = "allocation_generations"
+    __table_args__ = {"schema": SCHEMA}
+
+    customer_id: Mapped[str] = mapped_column(String(64), ForeignKey("finance.users.customer_id", ondelete="CASCADE"), primary_key=True)
+    request_id: Mapped[str] = mapped_column(UUID(as_uuid=False), primary_key=True)
+    session_id: Mapped[str] = mapped_column(UUID(as_uuid=False), primary_key=True)
+    task_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    response: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
 
 class AllocationPlanItem(Base):
@@ -212,6 +228,7 @@ __all__ = [
     "AiPosition",
     "AiTrade",
     "AllocationPlan",
+    "AllocationGeneration",
     "AllocationPlanItem",
     "MONEY",
     "ProductNavHistory",

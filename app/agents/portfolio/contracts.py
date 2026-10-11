@@ -11,8 +11,43 @@ from __future__ import annotations
 
 from typing import Any, Mapping, Sequence
 
+from pydantic import BaseModel, ConfigDict, Field
+
 #: 与支付/行情口径无关，仅用于识别"这份载荷是哪个版本的 agent 产出的"。
 ALLOCATION_AGENT_VERSION = "portfolio-allocation-v1"
+
+
+class AllocationOffer(BaseModel):
+    """挂起前的三档方案集（结果侧留痕）。
+
+    ``plans`` / ``unavailable`` 沿用服务的开放结构，不在本层收窄——方案明细的字段
+    白名单由 ``build_allocation_payload`` 与 ``public_allocation_payload`` 负责。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    plans: list[dict[str, Any]] = Field(default_factory=list)
+    unavailable: list[dict[str, Any]] = Field(default_factory=list)
+    nav_as_of: str = ""
+    missing_nav: list[str] = Field(default_factory=list)
+
+
+class AllocationOutcome(BaseModel):
+    """采纳方案后的成交摘要。字段严格对齐 ``evidence._ADOPTED_FIELDS``。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    plan_id: str = ""
+    tier: str = ""
+    tier_label: str = ""
+    cash_balance: float | None = None
+    total_assets: float | None = None
+    unit_nav: float | None = None
+    total_fee: float | None = None
+    trade_count: int | None = None
+    established: bool | None = None
+    nav_as_of: str = ""
+
 
 #: 单份方案对外暴露的字段白名单。``weights`` 刻意不暴露——用户看的是调仓明细与金额，
 #: 原始权重向量既冗余又容易被误读为精确指令。
@@ -151,6 +186,8 @@ def validate_allocation_resume(
 __all__ = [
     "ALLOCATION_AGENT_VERSION",
     "AllocationInterruptError",
+    "AllocationOffer",
+    "AllocationOutcome",
     "build_allocation_payload",
     "public_allocation_payload",
     "validate_allocation_resume",

@@ -296,27 +296,9 @@ onMounted(load)
 </template>
 
 <style scoped>
-.page { flex: 1; min-height: 0; overflow: auto; padding: 24px; }
-.table-card :deep(.el-card__body) { overflow: visible; }
-.table-card :deep(.el-table) { width: 100%; }
+/* 页面骨架 / 指标卡 / 表格容器 / 盈亏配色等通用样式已提升到全局 style.css。 */
 .table-card :deep(.el-table__body-wrapper) { min-height: 48px; }
-.page-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 16px; }
-.eyebrow { margin: 0 0 6px; color: var(--color-text-muted); font: 10px/1 var(--font-mono); letter-spacing: .1em; }
-.page-head h2 { margin: 0 0 6px; font-size: 20px; color: var(--color-text); }
-.page-note { margin: 0; color: var(--color-text-secondary); font-size: 12px; max-width: 720px; }
-.page-tools { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
-.warn-alert { border-radius: 0; margin-bottom: 12px; }
 
-.stat-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 16px; }
-.stat { display: flex; flex-direction: column; gap: 6px; border: 1px solid var(--color-border); background: var(--color-surface); padding: 14px 16px; }
-.stat.primary { background: var(--color-primary); border-color: var(--color-primary); }
-.stat.primary .stat-label { color: rgba(255, 255, 255, 0.75); }
-.stat.primary strong { color: #fff; }
-.stat-label { color: var(--color-text-muted); font-size: 11px; }
-.stat strong { font-size: 18px; font-weight: 600; }
-.stat small { font-size: 11px; }
-
-.table-card { border: 1px solid var(--color-border); border-radius: 0; box-shadow: none; }
 .tab-label { display: inline-flex; align-items: center; gap: 6px; }
 .mono { color: var(--color-text-muted); font: 11px/1 var(--font-mono); margin-left: 6px; }
 .fee-warn { color: var(--color-danger); margin-left: 4px; }
@@ -327,15 +309,10 @@ onMounted(load)
 .deposit-note { margin: 0; color: var(--color-text-secondary); font-size: 12px; }
 .quick-row { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; }
 
-:deep(.pnl-up) { color: var(--color-success); }
-:deep(.pnl-down) { color: var(--color-danger); }
-:deep(.pnl-flat) { color: var(--color-text-secondary); }
-
 @media (max-width: 980px) {
   .stat-grid { grid-template-columns: repeat(2, 1fr); }
 }
 @media (max-width: 768px) {
-  .page { padding: 16px 12px; }
   .page-head { flex-direction: column; }
   .page-tools { width: 100%; }
 }

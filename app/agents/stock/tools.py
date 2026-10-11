@@ -10,7 +10,7 @@ from functools import partial
 from typing import Any
 
 from langchain_core.tools import tool
-from langgraph.types import interrupt
+from app.agents.evidence import NeedsClarification, current_execution, validate_tool_arguments
 
 from app.agents.stock.contracts import StockRequest
 from app.agents.stock.evidence_store import EvidenceContext, compact_evidence_preview
@@ -30,11 +30,53 @@ _CLARIFICATION_FIELDS = {
     "filter_by_profile",
 }
 
+_SAFE_OPTIONS = {
+    "strategy": {"value_quality": "价值质量", "growth_quality": "成长质量", "trend_momentum": "趋势动量"},
+    "horizon": {"short": "短期", "medium": "中期", "long": "长期"},
+    "candidate_count": {str(count): str(count) for count in range(1, 11)},
+    "filter_by_profile": {"true": "使用画像过滤", "false": "不使用画像过滤"},
+}
+
+
+def _trusted_clarification_options(execution: Any, options: list[dict], fields: list[str]) -> list[dict]:
+    securities = {str(code): str(code) for code in execution.domain_slots.get("symbols") or []}
+    indices = {str(code): str(code) for code in execution.domain_slots.get("index_scope") or []}
+
+    def metadata(value, target):
+        if isinstance(value, list):
+            for item in value:
+                metadata(item, target)
+        elif isinstance(value, dict):
+            code = value.get("thscode") or value.get("ts_code") or value.get("code")
+            if code:
+                target[str(code)] = str(value.get("name") or code)
+            for item in value.values():
+                if isinstance(item, (dict, list)):
+                    metadata(item, target)
+
+    for row in execution.rows:
+        if row.get("evidence_type") == "security_meta":
+            metadata(row["payload"], securities)
+            if "index" in row.get("tool_name", ""):
+                metadata(row["payload"], indices)
+    trusted = {**_SAFE_OPTIONS, "symbols": securities, "index_scope": indices}
+    result = []
+    for option in options:
+        field_name = option.get("field") or (fields[0] if len(fields) == 1 else "")
+        label = trusted.get(field_name, {}).get(option["id"])
+        if label is not None:
+            result.append({"id": option["id"], "label": label, "field": field_name})
+    return result
+
 
 @dataclass(frozen=True)
 class StockExecution:
     context: EvidenceContext
     profile: dict[str, Any] = field(default_factory=dict)
+    #: 本次执行的工具调用计数，用于单工具重复上限（内容可变，字段本身冻结）。
+    tool_calls: dict[str, int] = field(default_factory=dict)
+    tool_results: dict[str, Any] = field(default_factory=dict)
+    tool_locks: dict[str, asyncio.Lock] = field(default_factory=dict)
 
 
 _EXECUTION: ContextVar[StockExecution | None] = ContextVar("stock_execution", default=None)
@@ -46,6 +88,11 @@ def bind_stock_execution(context: EvidenceContext, *, profile: dict[str, Any] | 
 
 def reset_stock_execution(token: Token) -> None:
     _EXECUTION.reset(token)
+
+
+def optional_stock_execution() -> StockExecution | None:
+    """未绑定执行上下文时返回 None，供中间件做无状态兜底。"""
+    return _EXECUTION.get()
 
 
 def current_stock_execution() -> StockExecution:
@@ -66,6 +113,9 @@ def _save(store: Any, *, name: str, evidence_type: str, payload: Any, source: st
         source=source,
         as_of=as_of,
     )
+    execution = current_execution()
+    if execution is not None:
+        execution.rows.append(row)
     return compact_evidence_preview(row["payload"], row["id"])
 
 
@@ -113,8 +163,13 @@ def build_stock_local_tools(*, store: Any, tushare: Any = None, warehouse: Any =
             "options": cleaned_options,
             "request": {},
         }
-        answer = interrupt(payload)
-        return dict(answer) if isinstance(answer, dict) else {"answer": answer}
+        execution = current_execution()
+        if execution is not None:
+            payload["options"] = _trusted_clarification_options(execution, cleaned_options, cleaned_fields)
+            payload["question"] = "请补充已确认任务的必要条件，或从可核验选项中选择。"
+            payload["reason"] = "missing_" + "_".join(cleaned_fields)
+            execution.pending_clarification = payload
+        raise NeedsClarification(payload)
 
     @tool
     def calculate_technical_indicators(kline_evidence_id: str) -> dict[str, Any]:
@@ -179,6 +234,12 @@ def build_stock_local_tools(*, store: Any, tushare: Any = None, warehouse: Any =
     @tool
     async def collect_stock_events(thscode: str, days: int = 30) -> dict[str, Any]:
         """收集指定股票的新闻和公告事件，不保存新闻正文。"""
+        violation = validate_tool_arguments("collect_stock_events", {"thscode": thscode})
+        if violation:
+            execution = current_execution()
+            if execution is not None:
+                execution.warnings.append(violation)
+            raise ValueError(violation)
         if tushare is None or not hasattr(tushare, "list_events"):
             payload = {"thscode": thscode, "status": "unavailable", "events": []}
             return await asyncio.to_thread(
@@ -234,9 +295,12 @@ def build_stock_local_tools(*, store: Any, tushare: Any = None, warehouse: Any =
             for item in candidates if isinstance(candidates, list) else []:
                 if not isinstance(item, dict) or not _symbol(item):
                     continue
+                if row.get("evidence_type") != "quote" or "index" not in str(row.get("tool_name") or "").lower():
+                    continue
                 indices.append({
                     "thscode": _symbol(item), "name": item.get("name") or _symbol(item),
                     "last": item.get("last", item.get("price")), "change_pct": item.get("change_pct"),
+                    "turnover": item.get("turnover"),
                     "source": row.get("source") or "fuyao", "as_of": item.get("as_of") or row.get("as_of") or "",
                 })
         from datetime import datetime, timezone
@@ -259,6 +323,15 @@ def build_stock_local_tools(*, store: Any, tushare: Any = None, warehouse: Any =
         membership_evidence_ids: list[str] | None = None,
     ) -> dict[str, Any]:
         """使用已发布快照确定性评分并排序研究候选，模型不得改序。"""
+        execution = current_execution()
+        if execution is not None:
+            actual = {"strategy": strategy, "horizon": horizon, "industries": list(industries or []),
+                      "index_scope": list(index_scope or []), "candidate_count": candidate_count,
+                      "filter_by_profile": filter_by_profile}
+            for key, value in actual.items():
+                if key in execution.domain_slots and value != execution.domain_slots[key]:
+                    execution.warnings.append(f"slot_override_rejected:{key}")
+                    raise ValueError(f"slot_override_rejected:{key}")
         if warehouse is None:
             payload = {"failed": True, "candidates": [], "warnings": ["stock_snapshot_stale"],
                        "sources": ["snapshot"], "as_of": ""}

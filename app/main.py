@@ -117,12 +117,28 @@ async def auth_rate_limit_middleware(request, call_next):
     return await call_next(request)
 
 
-__all__ = ["app"]
+def selector_loop_factory():
+    """强制使用 Selector 事件循环。
+
+    Windows 上 asyncio 默认的 ``ProactorEventLoop`` 与 psycopg 异步连接不兼容，
+    投顾运行时（PgSaver 连接池）会永久降级；官方启动路径必须避开它。
+    """
+    import asyncio
+    import selectors
+
+    return asyncio.SelectorEventLoop(selectors.SelectSelector())
+
+
+__all__ = ["app", "selector_loop_factory"]
 
 
 if __name__ == "__main__":
+    import sys
+
     import uvicorn
 
     from app.core.config import UVICORN_HOST, UVICORN_PORT
 
-    uvicorn.run("app.main:app", host=UVICORN_HOST, port=UVICORN_PORT, reload=False)
+    # 非 reload 的 uvicorn 在 Windows 会装 ProactorEventLoop，必须显式换掉。
+    loop = "app.main:selector_loop_factory" if sys.platform == "win32" else "auto"
+    uvicorn.run("app.main:app", host=UVICORN_HOST, port=UVICORN_PORT, reload=False, loop=loop)

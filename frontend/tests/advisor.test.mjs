@@ -6,6 +6,28 @@ import * as advisorState from '../src/features/chat/state.ts'
 
 const { applyRunSnapshot, initialTurn, missingProfileFields, profileOptionLabel, reduceTurn } = advisorState
 
+test('版本变化清除旧中断，禁用重试并提示从输入框重新发送', () => {
+  const paused = { ...initialTurn(), status: 'interrupted', missingFields: ['risk_level'], clarification: { kind: 'clarification' }, allocationPlans: [{ plan_id: 'old' }] }
+  const failed = applyRunSnapshot(paused, { status: 'failed', error_code: 'graph_version_changed', retryable: false })
+  assert.equal(failed.status, 'failed')
+  assert.equal(failed.retryable, false)
+  assert.equal(failed.errorCode, 'graph_version_changed')
+  assert.deepEqual(failed.missingFields, [])
+  assert.equal(failed.clarification, null)
+  assert.deepEqual(failed.allocationPlans, [])
+  assert.equal(advisorState.turnErrorMessage(failed), '投顾已更新，请在输入框重新发送问题。')
+  const event = reduceTurn(paused, { event: 'error', data: { code: 'graph_version_changed', retryable: true } })
+  assert.equal(event.retryable, false)
+  assert.equal(event.clarification, null)
+})
+
+test('确定性失败快照保持失败状态而不会重新锁住输入框', () => {
+  const failed = applyRunSnapshot(initialTurn(), { status: 'failed', retryable: false, error_code: 'invalid_input' })
+  assert.equal(failed.status, 'failed')
+  assert.equal(failed.retryable, false)
+  assert.equal(failed.errorCode, 'invalid_input')
+})
+
 test('SSE 解析保留半包并还原事件', () => {
   const first = parseSseBuffer('event: token\ndata: {"text":"你"}\n\nevent: to')
   assert.equal(first.events.length, 1)

@@ -222,30 +222,22 @@ onMounted(load)
 </template>
 
 <style scoped>
-.page { flex: 1; min-height: 0; overflow: auto; padding: 24px; }
-.table-card :deep(.el-card__body) { overflow: visible; }
-.table-card :deep(.el-table) { width: 100%; }
+/* 页面骨架 / 表格容器等通用样式已提升到全局 style.css。 */
 .table-card :deep(.el-table__body-wrapper) { min-height: 48px; }
-.page-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 16px; }
-.eyebrow { margin: 0 0 6px; color: var(--color-text-muted); font: 10px/1 var(--font-mono); letter-spacing: .1em; }
-.page-head h2 { margin: 0 0 6px; font-size: 20px; color: var(--color-text); }
-.page-note { margin: 0; color: var(--color-text-secondary); font-size: 12px; }
-.page-tools { display: flex; align-items: center; gap: 8px; flex-shrink: 0; flex-wrap: wrap; }
-.table-card { border: 1px solid var(--color-border); border-radius: 0; box-shadow: none; }
+
 .buy-form { display: flex; flex-direction: column; gap: 12px; }
 .buy-title { margin: 0; display: flex; align-items: baseline; gap: 8px; }
 .mono { color: var(--color-text-muted); font: 12px/1 var(--font-mono); }
 .buy-meta { margin: 0; display: grid; grid-template-columns: 1fr 1fr; gap: 8px 16px; }
 .buy-meta div { display: flex; flex-direction: column; gap: 2px; }
 .buy-meta dt { color: var(--color-text-muted); font-size: 11px; }
-.buy-meta dd { margin: 0; font-size: 13px; }
+.buy-meta dd { margin: 0; font-size: 13px; font-variant-numeric: tabular-nums; }
 .buy-meta small { color: var(--color-text-muted); }
-.buy-estimate { margin: 0; padding: 10px 12px; background: var(--color-primary-soft); font-size: 13px; }
-.buy-estimate strong { color: var(--color-primary); }
+.buy-estimate { margin: 0; padding: 10px 12px; border-radius: var(--radius); background: var(--color-primary-soft); font-size: 13px; }
+.buy-estimate strong { color: var(--color-primary); font-variant-numeric: tabular-nums; }
 .buy-estimate small { color: var(--color-text-secondary); font-size: 11px; }
 
 @media (max-width: 768px) {
-  .page { padding: 16px 12px; }
   .page-head { flex-direction: column; }
   .page-tools { width: 100%; }
 }

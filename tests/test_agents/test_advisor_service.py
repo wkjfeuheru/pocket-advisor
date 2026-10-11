@@ -10,7 +10,10 @@ from types import SimpleNamespace
 
 import pytest
 
+from app.agents.graphs.state import FinalAnswer, PortfolioResult, StockResult
+from app.agents.portfolio.contracts import AllocationOutcome
 from app.agents.runtime import AgentRuntime
+from app.agents.stock.contracts import CandidateStock, StockResultV1
 from app.services.agent_service import AdvisorServiceError, AgentService
 from app.services.portfolio_service import SIMULATED_DISCLAIMER
 from tests.test_agents.memory_store import MemoryAdvisorStore
@@ -78,14 +81,15 @@ class FakeGraph:
         self.mode = "done"
         self.answer = f"汇总完成\n\n{SIMULATED_DISCLAIMER}"
         self.interrupt_payload = None
-        self.agent_results = []
+        self.results: dict = {}
 
     async def astream(self, graph_input, config, stream_mode=None, durability=None):
         assert durability == "sync"
         assert config["configurable"]["thread_id"]
         self.inputs.append(graph_input)
         yield ("updates", {"classify_intent": {}})
-        yield ("messages", (SimpleNamespace(content=self.answer), {"langgraph_node": "compliance_node"}))
+        # 合规节点经 custom 流下发**已过滤**增量；原始 messages 片段（专家节点）不得外泄。
+        yield ("custom", {"text": self.answer})
         yield ("messages", (SimpleNamespace(content="EXPERT_SECRET"), {"langgraph_node": "stock_agent"}))
         if self.mode == "interrupt":
             return
@@ -106,9 +110,9 @@ class FakeGraph:
             return SimpleNamespace(values={}, tasks=[task], interrupts=())
         return SimpleNamespace(
             values={
-                "final_result": self.answer,
-                "warnings": ["股票行情暂不可用"],
-                "agent_results": self.agent_results,
+                "final": FinalAnswer(answer=self.answer),
+                "turn_warnings": ["股票行情暂不可用"],
+                **self.results,
             },
             tasks=[],
             interrupts=(),
@@ -194,15 +198,49 @@ def test_deterministic_failure_marks_turn_not_retryable():
     assert turn["error_code"] == "invalid_input"
 
 
-def test_compliance_tokens_are_streamed_incrementally():
-    """合规节点的增量文本以 token 事件下发，专家节点 token 被过滤。"""
+def test_final_answer_is_streamed_once_after_validation():
+    """只发送经过验证和持久化的最终答案。"""
     service, graph, _saver = _service()
     graph.answer = "最终答案"
     events = _events(service, request_id="24242424-2424-2424-2424-242424242424", session_id=None, message="流式")
     tokens = [e for e in events if e["event"] == "token"]
-    assert tokens
+    assert len(tokens) == 1
     assert all(t["data"]["text"] != "EXPERT_SECRET" for t in tokens)
     assert "".join(t["data"]["text"] for t in tokens) == "最终答案"
+
+
+def test_streamed_tokens_are_incremental_and_join_to_the_authoritative_answer():
+    """真流式：正文按增量下发，且"token 合计 == 权威答案"（落库/历史/done 同源）。"""
+
+    class ChunkedGraph(FakeGraph):
+        async def astream(self, graph_input, config, stream_mode=None, durability=None):
+            async for item in super().astream(graph_input, config, stream_mode, durability):
+                mode, payload = item
+                if mode == "custom":
+                    for piece in ["第一段。", "\n\n", "第二段。"]:
+                        yield ("custom", {"text": piece})
+                else:
+                    yield item
+
+    graph = ChunkedGraph()
+    graph.answer = "第一段。\n\n第二段。"
+    service, _, _saver = _service(graph)
+    events = _events(
+        service,
+        request_id="33333333-3333-3333-3333-333333333333",
+        session_id=None,
+        message="流式输出",
+    )
+    tokens = [event["data"]["text"] for event in events if event["event"] == "token"]
+    assert tokens == ["第一段。", "\n\n", "第二段。"]
+    assert "".join(tokens) == graph.answer
+    assert events[-1]["event"] == "done"
+    assert events[-1]["data"]["answer"] == graph.answer
+    with service.store.transaction():
+        sessions = service.store.list_sessions("CUST000001")
+        messages = service.store.list_messages("CUST000001", sessions[0]["id"])
+    assistant = next(item for item in messages if item["role"] == "assistant")
+    assert assistant["content"] == graph.answer
 
 
 def test_only_guard_approved_final_answer_is_streamed_as_tokens():
@@ -456,7 +494,7 @@ def test_delete_session_removes_checkpoint_thread():
     events = _events(service, request_id="77777777-7777-7777-7777-777777777777", session_id=None, message="删除我")
     session_id = events[0]["data"]["session_id"]
     asyncio.run(service.delete_session("CUST000001", session_id))
-    assert saver.deleted == [session_id]
+    assert saver.deleted == [f"advisor-v2:{session_id}:77777777-7777-7777-7777-777777777777"]
     with pytest.raises(AdvisorServiceError):
         service.list_messages("CUST000001", session_id)
 
@@ -521,21 +559,20 @@ def test_allocation_interrupt_is_labeled_waiting_for_a_plan():
 
 def test_portfolio_artifact_is_not_stripped_by_the_stock_projector():
     service, graph, _saver = _service()
-    graph.agent_results = [{
-        "agent": "portfolio_agent",
-        "artifacts": [{
-            "scenario": "allocation_adopted",
-            "allocation_adopted": {
-                "plan_id": "p-light",
-                "tier": "light",
-                "tier_label": "微调",
-                "unit_nav": 1.02,
-                "trade_count": 2,
-                "weights": {"110011": 0.6},
-            },
-            "kline": [{"close": 1}],
-        }],
-    }]
+    graph.results = {
+        "portfolio_result": PortfolioResult(
+            status="ok",
+            summary="已采纳微调方案",
+            source="postgresql",
+            adopted=AllocationOutcome(
+                plan_id="p-light",
+                tier="light",
+                tier_label="微调",
+                unit_nav=1.02,
+                trade_count=2,
+            ),
+        ),
+    }
     events = _events(
         service,
         request_id="17171717-1717-1717-1717-171717171718",
@@ -552,17 +589,28 @@ def test_portfolio_artifact_is_not_stripped_by_the_stock_projector():
 
 def test_artifact_event_is_emitted_before_token_and_restored_in_metadata():
     service, graph, _saver = _service()
-    graph.agent_results = [{
-        "agent": "stock_agent",
-        "artifacts": [{
-            "scenario": "market_overview",
-            "summary": "指数平稳",
-            "as_of": "2026-09-27T14:00:00+08:00",
-            "tool_args": {"api_key": "secret"},
-        }],
-        "candidate_stocks": [{"thscode": "600519.SH", "name": "贵州茅台", "score": 88}],
-        "warnings": ["stock_snapshot_stale_warning"],
-    }]
+    graph.results = {
+        "stock_result": StockResult(
+            status="ok",
+            summary="指数平稳",
+            as_of="2026-09-27T14:00:00+08:00",
+            result=StockResultV1(
+                scenario="market_overview",
+                summary="指数平稳",
+                as_of="2026-09-27T14:00:00+08:00",
+                sources=["fuyao"],
+                market_overview={
+                    "indices": [{
+                        "thscode": "000001.SH",
+                        "last": 3200.5,
+                        "source": "fuyao",
+                        "as_of": "2026-09-27T14:00:00+08:00",
+                    }],
+                },
+            ),
+            candidates=[CandidateStock(thscode="600519.SH", name="贵州茅台", score=88)],
+        ),
+    }
     events = _events(
         service,
         request_id="14141414-1414-1414-1414-141414141414",
@@ -604,6 +652,24 @@ def test_graph_input_reuses_stored_message_ids_for_dedup():
     assert [item["id"] for item in graph_input["messages"]] == [item["id"] for item in stored]
     # 重复注入同一批历史时 id 稳定，add_messages 才能按 id 去重。
     assert service._graph_input("CUST000001", prepared)["messages"] == graph_input["messages"]
+
+
+def test_graph_input_resets_every_per_turn_channel():
+    """每轮通道必须由 _graph_input 穷举置空，漏一个就会跨轮泄漏。"""
+    from app.agents.graphs.state import AdvisorState, PER_TURN_CHANNELS
+
+    service, _graph, _saver = _service()
+    prepared = service.prepare_chat(
+        "CUST000001",
+        request_id="1c1c1c1c-1c1c-1c1c-1c1c-1c1c1c1c1c1c",
+        session_id=None,
+        message="第一问",
+    )
+    graph_input = service._graph_input("CUST000001", prepared)
+
+    expected = set(AdvisorState.__annotations__) - {"messages", "profile_snapshot", "session_context"}
+    assert expected == set(PER_TURN_CHANNELS)
+    assert expected <= set(graph_input)
 
 
 def test_client_disconnect_marks_running_turn_retryable():

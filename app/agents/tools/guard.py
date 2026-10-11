@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections import Counter
+from collections.abc import Callable
 from typing import Any
 
 _FORBIDDEN_PARTS = (
@@ -80,7 +81,8 @@ def _tool_schema(tool: Any) -> Any:
     return {}
 
 
-def _decision(tool: Any, allowed_server_prefixes: tuple[str, ...]) -> str:
+def _decision(tool: Any, allowed_server_prefixes: tuple[str, ...],
+              trusted_readonly: Callable[[str], bool] | None = None) -> str:
     name = str(getattr(tool, "name", "") or "")
     if not name or is_forbidden_tool(name):
         return "dangerous_name"
@@ -90,7 +92,9 @@ def _decision(tool: Any, allowed_server_prefixes: tuple[str, ...]) -> str:
     if metadata.get("destructiveHint") is True or metadata.get("destructive_hint") is True:
         return "destructive_annotation"
     readonly = metadata.get("readOnlyHint", metadata.get("read_only_hint"))
-    if readonly is not True:
+    # 上游 MCP 不发布 readOnlyHint 时，只允许调用方显式声明的只读白名单工具兜底，
+    # 其余工具仍然 fail-closed；显式声明比"缺少注解即放行"安全得多。
+    if readonly is not True and not (trusted_readonly and trusted_readonly(name)):
         return "missing_readonly_annotation"
     if _schema_keys(_tool_schema(tool)) & _DANGEROUS_SCHEMA_PARTS:
         return "dangerous_schema"
@@ -101,8 +105,13 @@ def filter_mcp_tools(
     tools: list[Any],
     *,
     allowed_server_prefixes: tuple[str, ...],
+    trusted_readonly: Callable[[str], bool] | None = None,
 ) -> tuple[list[Any], dict[str, str]]:
-    """对动态 MCP tools 做来源、注解、schema 和重名检查。"""
+    """对动态 MCP tools 做来源、注解、schema 和重名检查。
+
+    ``trusted_readonly`` 仅在已知的上游不提供注解时使用：名字命中该判定即视为可读，
+    但来源前缀、危险名和危险 schema 检查依然生效。
+    """
     counts = Counter(str(getattr(tool, "name", "") or "") for tool in tools)
     accepted: list[Any] = []
     rejected: dict[str, str] = {}
@@ -111,7 +120,7 @@ def filter_mcp_tools(
         if counts[name] > 1:
             rejected[name] = "duplicate_name"
             continue
-        reason = _decision(tool, allowed_server_prefixes)
+        reason = _decision(tool, allowed_server_prefixes, trusted_readonly)
         if reason:
             rejected[name] = reason
         else:

@@ -10,14 +10,15 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
+from contextlib import nullcontext
+from dataclasses import dataclass, field, replace
 from datetime import date, timedelta
 from typing import Any, Mapping, Protocol
 
 logger = logging.getLogger(__name__)
 
 from app.agents.portfolio.contracts import AllocationInterruptError
-from app.agents.portfolio.validation import ValidationConstraints
+from app.agents.portfolio.validation import RISK_ORDER, ValidationConstraints, risk_index
 from app.services.portfolio_advisor.adopt import AdoptError, adopt_selected_plan
 from app.services.portfolio_advisor.allocation import (
     AllocationError,
@@ -140,9 +141,35 @@ class AdvisorService:
         session_id: str | None = None,
         as_of: date | None = None,
         candidates: Mapping[Any, Mapping[str, float]] | None = None,
+        task_id: str = "",
+        max_risk: str | None = None,
     ) -> dict[str, Any]:
-        """取持仓与商品池，生成三档方案并落库。"""
+        """锁定生成任务，整批提交方案与完整快照；未提交批次不能重放。"""
+        store = self._deps.plan_store
+        keyed = bool(request_id and session_id and task_id)
+        transaction = getattr(store, "generation_context", None)
+        if keyed and (transaction is None or not hasattr(store, "get_generation") or not hasattr(store, "save_generation")):
+            raise AdvisorServiceError("配置存储暂不支持可靠的任务生成", code="generation_persistence_unavailable")
+        scope = transaction(customer_id, request_id=request_id, session_id=session_id, task_id=task_id) if transaction else nullcontext()
+        with scope:
+            if keyed:
+                replay = store.get_generation(customer_id, request_id=request_id, session_id=session_id, task_id=task_id)
+                if replay is not None:
+                    return replay
+            response = self._generate(customer_id, request_id=request_id, session_id=session_id,
+                                      as_of=as_of, candidates=candidates, task_id=task_id, max_risk=max_risk)
+            if keyed:
+                return store.save_generation(customer_id, response, request_id=request_id, session_id=session_id, task_id=task_id)
+            return response
+
+    def _generate(self, customer_id: str, *, request_id: str | None = None, session_id: str | None = None,
+                  as_of: date | None = None, candidates: Mapping[Any, Mapping[str, float]] | None = None,
+                  task_id: str = "", max_risk: str | None = None) -> dict[str, Any]:
+        """在调用方的生成事务里取数、计算和写入各档方案。"""
         deps = self._deps
+        if max_risk is not None and max_risk not in RISK_ORDER:
+            raise AdvisorServiceError("画像风险等级无效", code="invalid_risk_level")
+        constraints = replace(deps.constraints, max_risk_level=max_risk) if max_risk else deps.constraints
         positions = deps.portfolio.list_positions(customer_id)
         if not positions:
             raise AdvisorServiceError("当前没有持仓，无法给出调仓建议", code="no_positions")
@@ -196,12 +223,13 @@ class AdvisorService:
                 customer_id=customer_id,
                 current_weights=current_weights,
                 products=products,
-                constraints=deps.constraints,
+                constraints=constraints,
                 candidates=candidates,
                 initial_capital=total,
                 nav_as_of=nav_as_of,
                 request_id=request_id,
                 session_id=session_id,
+                task_id=task_id,
             )
         except AllocationError as exc:
             raise AdvisorServiceError(str(exc), code=exc.code) from exc
@@ -278,10 +306,22 @@ class AdvisorService:
         *,
         request_id: str | None = None,
         as_of: date | None = None,
+        max_risk: str | None = None,
     ) -> dict[str, Any]:
         """采纳一个方案：写入 AI 账本。用户持仓不动。"""
         deps = self._deps
         plan = self.get_plan(customer_id, plan_id)  # 复用存在性与归属校验
+        if max_risk is not None:
+            if max_risk not in RISK_ORDER:
+                raise AdvisorServiceError("最新画像风险等级无效", code="invalid_risk_level")
+            target_codes = [str(item["product_code"]) for item in plan["items"]
+                            if float(item.get("target_weight") or 0) > 1e-12]
+            products = {str(item.get("code") or (item.get("basic_info") or {}).get("code") or ""):
+                        item.get("basic_info") or item for item in deps.library.query_by_codes(target_codes)}
+            for code in target_codes:
+                risk = risk_index((products.get(code) or {}).get("risk_level"))
+                if risk is None or risk > RISK_ORDER.index(max_risk):
+                    raise AdvisorServiceError(f"方案商品 {code} 不符合最新画像风险上限 {max_risk}", code="risk_exceeded")
 
         positions = deps.portfolio.list_positions(customer_id)
         if not positions:

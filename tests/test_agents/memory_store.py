@@ -71,6 +71,7 @@ class MemoryAdvisorStore:
             "id": str(uuid.uuid4()),
             "customer_id": customer_id.upper(),
             "title": title,
+            "context": {},
             "created_at": now,
             "updated_at": now,
         }
@@ -96,7 +97,7 @@ class MemoryAdvisorStore:
         self.messages.append(row)
         return dict(row)
 
-    def insert_turn(self, session_id: str, request_id: str, status: str = "pending") -> dict[str, Any]:
+    def insert_turn(self, session_id: str, request_id: str, status: str = "pending", *, graph_version: str = "advisor-v2") -> dict[str, Any]:
         if request_id in self.turns:
             raise UniqueConstraintError("请求已存在")
         if status in ACTIVE and self.active_turn(session_id) is not None:
@@ -106,6 +107,7 @@ class MemoryAdvisorStore:
             "request_id": request_id,
             "session_id": session_id,
             "status": status,
+            "graph_version": graph_version,
             "stage": "",
             "interrupt_payload": None,
             "final_answer": "",
@@ -152,6 +154,12 @@ class MemoryAdvisorStore:
     def list_sessions(self, customer_id: str) -> list[dict[str, Any]]:
         rows = [row for row in self.sessions.values() if row["customer_id"] == customer_id.upper()]
         return sorted(rows, key=lambda item: item["updated_at"], reverse=True)
+
+    def list_turns(self, session_id: str) -> list[dict[str, Any]]:
+        return [dict(row) for row in self.turns.values() if row["session_id"] == session_id]
+
+    def update_session_context(self, session_id: str, context: dict[str, Any]) -> None:
+        self.sessions[session_id]["context"] = copy.deepcopy(context)
 
     def list_messages(self, customer_id: str, session_id: str) -> list[dict[str, Any]]:
         if self.get_session(customer_id, session_id) is None:

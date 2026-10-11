@@ -62,24 +62,55 @@ def test_unknown_agents_never_leak_the_raw_payload():
 
 
 def test_public_artifacts_projects_every_result_with_its_own_agent():
-    results = [
-        {"agent": "stock_agent", "artifacts": [STOCK_PAYLOAD],
-         "candidate_stocks": [{"thscode": "600519.SH", "name": "贵州茅台", "score": 80.0}]},
-        {"agent": "portfolio_agent", "artifacts": [PORTFOLIO_PAYLOAD], "candidate_stocks": []},
-    ]
+    from app.agents.graphs.state import PortfolioResult, StockResult
+    from app.agents.portfolio.contracts import AllocationOutcome
+    from app.agents.stock.contracts import CandidateStock, StockResultV1
 
-    artifacts, candidates = public_artifacts(results)
+    stock = StockResult(
+        status="ok",
+        summary="候选池",
+        result=StockResultV1(
+            scenario="stock_screening",
+            summary="候选池",
+            as_of="2026-09-25T15:00:00+08:00",
+            sources=["fuyao"],
+            stock_screening={
+                "candidates": [{
+                    "thscode": "600519.SH", "name": "贵州茅台", "score": 80.0,
+                    "source": "fuyao", "as_of": "2026-09-25T15:00:00+08:00",
+                }],
+            },
+        ),
+        candidates=[CandidateStock(thscode="600519.SH", name="贵州茅台", score=80.0)],
+    )
+    portfolio = PortfolioResult(
+        status="ok",
+        summary="已采纳",
+        adopted=AllocationOutcome(plan_id="p-light", tier="light", unit_nav=1.02, trade_count=2),
+    )
+
+    artifacts, candidates = public_artifacts([stock, portfolio])
 
     assert [item["schema_version"] for item in artifacts] == [
         "stock-public-v1", "portfolio-public-v1",
     ]
+    assert artifacts[0]["stock_screening"]["candidates"][0]["thscode"] == "600519.SH"
     assert candidates == [{"thscode": "600519.SH", "name": "贵州茅台", "score": 80.0}]
 
 
 def test_public_artifacts_ignores_malformed_results():
+    from app.agents.graphs.state import PortfolioResult
+    from app.agents.portfolio.contracts import AllocationOutcome
+
     artifacts, candidates = public_artifacts([
         None,
-        {"agent": "portfolio_agent", "artifacts": [None, "x", PORTFOLIO_PAYLOAD]},
+        "x",
+        PortfolioResult(
+            status="ok",
+            summary="已采纳",
+            adopted=AllocationOutcome(plan_id="p-light", unit_nav=1.02, trade_count=2),
+        ),
+        PortfolioResult(status="ok", summary="挂起中，无采纳结果"),
     ])
 
     assert [item["schema_version"] for item in artifacts] == ["portfolio-public-v1"]

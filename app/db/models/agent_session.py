@@ -18,7 +18,7 @@ from app.db.base import Base
 
 
 class AgentSession(Base):
-    """一次投顾对话。``id`` 同时作为 LangGraph ``thread_id``。"""
+    """一次投顾对话；checkpoint 以版本、会话与请求隔离。"""
 
     __tablename__ = "agent_sessions"
     __table_args__ = {"schema": "finance"}
@@ -30,6 +30,7 @@ class AgentSession(Base):
         nullable=False,
     )
     title: Mapped[str] = mapped_column(String(256), nullable=False, default="")
+    context: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
@@ -77,6 +78,7 @@ class AgentTurn(Base):
         nullable=False,
     )
     status: Mapped[str] = mapped_column(String(16), nullable=False)
+    graph_version: Mapped[str] = mapped_column(String(32), nullable=False, default="legacy", server_default="legacy")
     stage: Mapped[str] = mapped_column(String(64), nullable=False, default="")
     interrupt_payload: Mapped[Optional[dict[str, Any]]] = mapped_column(JSONB, nullable=True)
     final_answer: Mapped[str] = mapped_column(Text, nullable=False, default="")

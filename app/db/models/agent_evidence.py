@@ -32,6 +32,7 @@ class AgentToolEvidence(Base):
         String(64), ForeignKey("finance.users.customer_id", ondelete="CASCADE"), nullable=False,
     )
     tool_call_id: Mapped[str] = mapped_column(String(128), nullable=False, default="")
+    task_id: Mapped[str] = mapped_column(String(128), nullable=False, default="", server_default="")
     tool_name: Mapped[str] = mapped_column(String(128), nullable=False)
     input_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     evidence_type: Mapped[str] = mapped_column(String(64), nullable=False)

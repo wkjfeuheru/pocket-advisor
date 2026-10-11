@@ -6,17 +6,22 @@
 - 与 LangGraph 的耦合只剩一个函数签名；
 - 挂起前先落库，因此 resume 时方案一定存在。
 
-返回值沿用既有 ``_specialist_node`` 期望的形状（``content`` / ``artifacts`` /
-``warnings`` / ``recommended_product_codes`` 等），照 ``empty_result`` 的字段补齐，
-这样 compliance_node 与 suitability_guard 不需要知道这个分支的存在。
+返回值是结构化的 ``PortfolioResult``：``offer`` 承载挂起前的三档方案集，
+``adopted`` 承载采纳后的成交摘要。节点与 compliance_node / suitability_guard
+只认这个类型，不需要知道分支内部细节。
 """
 
 from __future__ import annotations
 
 from typing import Any, Callable, Mapping
+from inspect import signature
+from datetime import date
 
+from app.agents.graphs.state import PortfolioResult
 from app.agents.portfolio.contracts import (
     AllocationInterruptError,
+    AllocationOffer,
+    AllocationOutcome,
     build_allocation_payload,
     validate_allocation_resume,
 )
@@ -38,23 +43,43 @@ class AllocationBranchError(ValueError):
 
 def _result(
     *,
-    content: str,
-    artifacts: list[dict[str, Any]] | None = None,
+    summary: str,
+    status: str = "ok",
     warnings: list[str] | None = None,
-    failed: bool = False,
-) -> dict[str, Any]:
-    """与 ``empty_result`` 同形状，字段不多不少。"""
-    return {
-        "agent": "portfolio_agent",
-        "content": content,
-        "recommended_product_codes": [],
-        "candidate_stocks": [],
-        "artifacts": list(artifacts or []),
-        "warnings": list(warnings or []),
-        "source": "postgresql",
-        "as_of": "",
-        "failed": failed,
-    }
+    offer: AllocationOffer | None = None,
+    adopted: AllocationOutcome | None = None,
+) -> PortfolioResult:
+    """构造持仓 worker 结果。``offer`` / ``adopted`` 分别对应两种产物。"""
+    return PortfolioResult(
+        status=status,  # type: ignore[arg-type] - 由调用点保证是三态之一
+        summary=summary,
+        warnings=list(warnings or []),
+        source="postgresql" if offer is not None or adopted is not None else "",
+        as_of=offer.nav_as_of if offer is not None else "",
+        offer=offer,
+        adopted=adopted,
+    )
+
+
+def _offer(generated: Mapping[str, Any]) -> AllocationOffer:
+    """把服务返回整理成方案集：挂起前留痕，供结果侧核对。"""
+    return AllocationOffer(
+        plans=list(generated.get("plans") or []),
+        unavailable=list(generated.get("unavailable") or []),
+        nav_as_of=str(generated.get("nav_as_of") or ""),
+        missing_nav=list(generated.get("missing_nav") or []),
+    )
+
+
+def _outcome(raw: Mapping[str, Any]) -> AllocationOutcome:
+    """按白名单字段把采纳结果收成结构化摘要（丢弃 weights 等内部字段）。"""
+    payload = {key: value for key, value in raw.items() if key in AllocationOutcome.model_fields}
+    as_of = payload.get("nav_as_of")
+    if isinstance(as_of, date):
+        payload["nav_as_of"] = as_of.isoformat()
+    elif as_of is None:
+        payload["nav_as_of"] = ""
+    return AllocationOutcome(**payload)
 
 
 def _summarize(service_payload: Mapping[str, Any]) -> str:
@@ -81,22 +106,36 @@ def run_allocation_task(
     interrupt: Callable[[Any], Any],
     request_id: str | None = None,
     session_id: str | None = None,
-) -> dict[str, Any]:
+    task_id: str = "",
+    max_risk: str | None = None,
+    domain_slots: dict[str, Any] | None = None,
+) -> PortfolioResult:
     """跑一次配置建议：生成 → 挂起 → 校验选择 → 采纳。
 
     ``interrupt`` 是 LangGraph 的 ``interrupt``（或测试替身）。它在**方案已落库之后**
     才被调用，因此用户 resume 时引用的 ``plan_id`` 必然存在。
     """
+    slots = domain_slots or {}
+    unsupported = [key for key in ("limitations", "amount", "timeframe") if slots.get(key)]
+    if unsupported:
+        return _result(summary="当前配置引擎无法验证本次附加条件，请调整条件后再生成方案。",
+                       status="degraded", warnings=[f"unsupported_{key}" for key in unsupported])
     try:
-        generated = service.generate(customer_id, request_id=request_id, session_id=session_id)
+        kwargs = {"request_id": request_id, "session_id": session_id}
+        if task_id:
+            kwargs["task_id"] = task_id
+        if max_risk:
+            kwargs["max_risk"] = max_risk
+        generated = service.generate(customer_id, **kwargs)
     except Exception as exc:  # noqa: BLE001 - 生成失败要降级成可展示的结果
         return _result(
-            content=f"暂时无法生成配置建议：{exc}",
+            summary="暂时无法生成配置建议，请稍后重试。",
+            status="failed",
             warnings=[f"生成配置建议失败：{type(exc).__name__}"],
-            failed=True,
         )
 
     plans = list(generated.get("plans") or [])
+    offer = _offer(generated)
     if not plans:
         # 一个可用档位都没有：不挂起（挂起也没有可选项），直接如实说明。
         unavailable = list(generated.get("unavailable") or [])
@@ -105,12 +144,13 @@ def run_allocation_task(
             for item in unavailable
         )
         return _result(
-            content=(
+            summary=(
                 "当前持仓下没有可行的调仓方案。"
                 + (f"已排除的档位：{detail}。" if detail else "")
             ),
+            status="degraded",
             warnings=["没有可行的调仓方案"],
-            failed=False,
+            offer=offer,
         )
 
     payload = build_allocation_payload(plans)
@@ -122,32 +162,36 @@ def run_allocation_task(
         chosen = validate_allocation_resume(payload, resume_value)
     except AllocationInterruptError as exc:
         return _result(
-            content=f"方案选择无效，请重新发起配置建议（{exc}）。",
+            summary=f"方案选择无效，请重新发起配置建议（{exc}）。",
+            status="failed",
             warnings=[f"方案选择无效：{exc.code}"],
-            failed=True,
+            offer=offer,
         )
 
     try:
-        outcome = service.adopt(customer_id, chosen["plan_id"], request_id=request_id)
+        adopt_kwargs = {"request_id": request_id}
+        if max_risk and "max_risk" in signature(service.adopt).parameters:
+            adopt_kwargs["max_risk"] = max_risk
+        adopted = service.adopt(customer_id, chosen["plan_id"], **adopt_kwargs)
     except Exception as exc:  # noqa: BLE001 - 采纳失败要能解释，不能把整轮打崩
         return _result(
-            content=f"采纳方案失败：{exc}",
+            summary="采纳方案失败，请核对当前画像与方案条件后重试。",
+            status="failed",
             warnings=[f"采纳方案失败：{type(exc).__name__}"],
-            failed=True,
+            offer=offer,
         )
 
-    artifact = {
-        "scenario": "allocation_adopted",
-        "allocation_adopted": outcome,
-    }
+    outcome = _outcome(adopted)
     return _result(
-        content=(
-            f"已采纳「{outcome.get('tier_label') or outcome.get('tier')}」方案："
-            f"成交 {outcome.get('trade_count')} 笔，"
-            f"AI 账户单位净值 {outcome.get('unit_nav')}。"
+        summary=(
+            f"已采纳「{outcome.tier_label or outcome.tier}」方案："
+            f"成交 {outcome.trade_count} 笔，"
+            f"AI 账户单位净值 {outcome.unit_nav}。"
             "您的真实持仓未做任何改动。"
         ),
-        artifacts=[artifact],
+        status="ok",
+        offer=offer,
+        adopted=outcome,
     )
 
 

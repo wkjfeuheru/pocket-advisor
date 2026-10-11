@@ -11,6 +11,7 @@ from langchain_core.messages import ToolMessage
 
 from app.agents.stock.evidence_store import compact_evidence_preview
 from app.agents.stock.tools import current_stock_execution
+from app.agents.evidence import current_execution, NeedsClarification, validate_tool_arguments
 from app.mcp.fuyao import operation_for_tool_name
 from app.mcp.fuyao_dto import normalize_payload
 
@@ -147,8 +148,17 @@ def persist_tool_output(
 def build_evidence_middleware(store: Any, mcp_tool_names: set[str]) -> Any:
     @wrap_tool_call(name="StockEvidenceMiddleware")
     async def capture(request: Any, handler: Any) -> Any:
-        result = await handler(request)
         name = str(request.tool_call.get("name") or "")
+        execution_context = current_execution()
+        if execution_context is not None and execution_context.pending_clarification:
+            raise NeedsClarification(execution_context.pending_clarification)
+        violation = validate_tool_arguments(name, request.tool_call.get("args") or {}) if name in mcp_tool_names else ""
+        if violation:
+            if execution_context is not None:
+                execution_context.warnings.append(violation)
+            return ToolMessage(content=json.dumps({"warning": violation, "data": None}),
+                               tool_call_id=str(request.tool_call.get("id") or ""), name=name, status="error")
+        result = await handler(request)
         if name not in mcp_tool_names:
             return result
         execution = current_stock_execution()
@@ -161,6 +171,8 @@ def build_evidence_middleware(store: Any, mcp_tool_names: set[str]) -> Any:
             arguments=request.tool_call.get("args") or {},
             result=result,
         )
+        if execution_context is not None:
+            execution_context.rows.append(await asyncio.to_thread(store.get, preview["evidence_id"], execution.context))
         return ToolMessage(
             content=json.dumps(preview, ensure_ascii=False, default=str),
             tool_call_id=str(request.tool_call.get("id") or ""),

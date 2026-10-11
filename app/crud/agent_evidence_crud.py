@@ -27,6 +27,7 @@ def _row(item: AgentToolEvidence) -> dict[str, Any]:
     return {
         "id": str(item.id), "request_id": str(item.request_id), "session_id": str(item.session_id),
         "customer_id": item.customer_id, "tool_call_id": item.tool_call_id, "tool_name": item.tool_name,
+        "task_id": item.task_id,
         "input_hash": item.input_hash, "evidence_type": item.evidence_type,
         "payload": item.sanitized_payload, "source": item.source, "as_of": item.as_of,
         "created_at": item.created_at.isoformat(), "expires_at": item.expires_at.isoformat(),
@@ -51,6 +52,7 @@ class PostgresAgentEvidenceStore:
         item = AgentToolEvidence(
             id=uuid.uuid4(), request_id=_uuid(context.request_id), session_id=_uuid(context.session_id),
             customer_id=context.customer_id.upper(), tool_call_id=str(tool_call_id), tool_name=str(tool_name),
+            task_id=context.task_id,
             input_hash=input_hash(arguments or {}), evidence_type=str(evidence_type),
             sanitized_payload=sanitize_evidence_payload(payload), source=str(source), as_of=str(as_of),
             created_at=now, expires_at=now + EVIDENCE_TTL,
@@ -70,6 +72,7 @@ class PostgresAgentEvidenceStore:
                 .where(AgentToolEvidence.request_id == _uuid(context.request_id))
                 .where(AgentToolEvidence.session_id == _uuid(context.session_id))
                 .where(AgentToolEvidence.customer_id == context.customer_id.upper())
+                .where(AgentToolEvidence.task_id.in_((context.task_id, *context.dependency_task_ids)))
                 .where(AgentToolEvidence.expires_at > now)
             )
             if item is None:

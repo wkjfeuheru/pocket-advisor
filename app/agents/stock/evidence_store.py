@@ -26,6 +26,8 @@ class EvidenceContext:
     request_id: str
     session_id: str
     customer_id: str
+    task_id: str = ""
+    dependency_task_ids: tuple[str, ...] = ()
 
 
 def sanitize_evidence_payload(value: Any, *, key: str = "") -> Any:
@@ -89,6 +91,7 @@ class MemoryAgentEvidenceStore:
             "request_id": context.request_id,
             "session_id": context.session_id,
             "customer_id": context.customer_id.upper(),
+            "task_id": context.task_id,
             "tool_call_id": tool_call_id,
             "tool_name": tool_name,
             "input_hash": input_hash(arguments or {}),
@@ -109,6 +112,7 @@ class MemoryAgentEvidenceStore:
             or row["request_id"] != context.request_id
             or row["session_id"] != context.session_id
             or row["customer_id"] != context.customer_id.upper()
+            or row.get("task_id", "") not in (context.task_id, *context.dependency_task_ids)
             or datetime.fromisoformat(row["expires_at"]) <= self._clock()
         ):
             raise EvidenceAccessError("evidence_not_available")

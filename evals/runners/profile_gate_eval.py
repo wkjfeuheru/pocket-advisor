@@ -34,7 +34,12 @@ async def _judge(case: dict[str, Any]) -> dict[str, Any]:
         )
         for item in case["intents"]
     ])
-    model = ScriptedModel(intents, ["按画像整理的回答。\n推荐代码: 无"])
+    # 固定有效领域槽位，单独评估画像门禁；槽位准确性由 v2 槽位评估覆盖。
+    model = ScriptedModel(intents, ["按画像整理的回答。\n推荐代码: 无"], slot_values={
+        "stock_agent": {"scenario": "market_overview"},
+        "product_agent": {"operation": "query", "product_type": "fund"},
+        "portfolio_agent": {"operation": "query"},
+    })
     graph = build_eval_graph(model)
     config = {"configurable": {"thread_id": f"profile-{case['case_id']}"}}
     profile = dict(case["profile_snapshot"])
@@ -44,7 +49,8 @@ async def _judge(case: dict[str, Any]) -> dict[str, Any]:
     resumed_once = False
     for _ in range(2):
         await graph.ainvoke(
-            {"messages": [{"role": "user", "content": "评测请求"}], "profile_snapshot": profile},
+            # 有效的原文支持固定槽位，避免原文授权校验将基金类型删除。
+            {"messages": [{"role": "user", "content": "查询基金，查看持仓和大盘"}], "profile_snapshot": profile},
             config,
             durability="sync",
         )

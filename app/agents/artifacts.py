@@ -1,12 +1,13 @@
-"""按 agent 分派公开 artifact 投影器。
+"""按 worker 结果类型分派公开 artifact 投影器。
 
 未登记的 agent 一律不公开 artifact。股票与持仓各自只保留自己的白名单字段。
 """
 
 from __future__ import annotations
 
-from typing import Any, Callable
+from typing import Any, Callable, Sequence
 
+from app.agents.graphs.state import PortfolioResult, StockResult, WorkerBase
 from app.agents.portfolio.evidence import public_portfolio_artifact
 from app.agents.stock.evidence import public_stock_artifact
 
@@ -27,29 +28,45 @@ def project_artifact(agent: str, payload: dict[str, Any]) -> dict[str, Any]:
     return projector(dict(payload or {}))
 
 
-def public_artifacts(agent_results: list[Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """遍历专业结果，逐条用它自己的 agent 投影器生成公开 artifact。"""
+def artifact_for_result(result: WorkerBase) -> dict[str, Any]:
+    """把单个 worker 结果投影成公开 artifact；没有可公开内容时返回空字典。
+
+    - 股票：公开投影的输入 = ``StockResultV1.model_dump()`` 再补回 ``candidate_stocks``
+      （前端从 artifact 事件读取候选池，见 ``candidate_stocks`` 契约）。
+    - 持仓：只有采纳结果（``adopted``）才产 artifact；挂起的 ``offer`` 走 interrupt 载荷。
+    """
+    if isinstance(result, StockResult) and result.result is not None:
+        payload = dict(result.result.model_dump())
+        payload["candidate_stocks"] = [item.model_dump() for item in result.candidates]
+        return project_artifact("stock_agent", payload)
+    if isinstance(result, PortfolioResult) and result.adopted is not None:
+        return project_artifact(
+            "portfolio_agent",
+            {"scenario": "allocation_adopted", "allocation_adopted": result.adopted.model_dump()},
+        )
+    return {}
+
+
+def public_artifacts(
+    results: Sequence[WorkerBase],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """遍历 worker 结果，逐条用其类型对应的投影器生成公开 artifact，并汇总候选池。"""
     artifacts: list[dict[str, Any]] = []
     candidates: list[dict[str, Any]] = []
-    for result in agent_results or []:
-        if not isinstance(result, dict):
+    for result in results or []:
+        if not isinstance(result, WorkerBase):
             continue
-        agent = str(result.get("agent") or "")
-        for item in result.get("artifacts") or []:
-            if not isinstance(item, dict):
-                continue
-            projected = project_artifact(agent, item)
-            if projected:
-                artifacts.append(projected)
-        for item in result.get("candidate_stocks") or []:
-            if not isinstance(item, dict):
-                continue
-            candidates.append({
-                "thscode": item.get("thscode"),
-                "name": item.get("name") or "",
-                "score": item.get("score"),
-            })
+        projected = artifact_for_result(result)
+        if projected:
+            artifacts.append(projected)
+        if isinstance(result, StockResult):
+            for item in result.candidates:
+                candidates.append({
+                    "thscode": item.thscode,
+                    "name": item.name,
+                    "score": item.score,
+                })
     return artifacts, candidates
 
 
-__all__ = ["project_artifact", "public_artifacts"]
+__all__ = ["artifact_for_result", "project_artifact", "public_artifacts"]

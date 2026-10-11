@@ -172,18 +172,79 @@ watch([aiCurve, userCurve], () => {
 </template>
 
 <style scoped>
-.compare-view { padding: 16px; max-width: 960px; }
-.compare-head { display: flex; justify-content: space-between; align-items: center; }
-.compare-head h2 { font-size: 16px; margin: 0; }
-.refresh { border: 1px solid #dcdfe6; background: #fff; border-radius: 4px; padding: 4px 10px; cursor: pointer; }
-.compare-error { color: #c45656; }
-.compare-metrics { display: flex; flex-wrap: wrap; gap: 24px; margin: 12px 0; }
-.compare-metrics dt { color: #909399; font-size: 12px; }
-.compare-metrics dd { margin: 0; font-variant-numeric: tabular-nums; }
-.compare-chart { width: 100%; height: 320px; }
-.compare-table { width: 100%; border-collapse: collapse; font-size: 12px; margin-top: 12px; }
-.compare-table th { text-align: left; color: #909399; font-weight: 400; border-bottom: 1px solid #ebeef5; padding: 4px 6px; }
-.compare-table td { padding: 4px 6px; border-bottom: 1px solid #f5f7fa; font-variant-numeric: tabular-nums; }
-.compare-limits { margin: 12px 0 0; padding-left: 16px; color: #909399; font-size: 12px; }
-.compare-empty, .compare-note { color: #909399; font-size: 13px; }
+.compare-view { padding: 28px; max-width: 1000px; }
+.compare-head { display: flex; justify-content: space-between; align-items: center; gap: 16px; }
+.compare-head h2 {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: var(--text-2xl);
+  font-weight: 600;
+  color: var(--color-primary);
+}
+.refresh {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  background: var(--color-surface);
+  color: var(--color-text-secondary);
+  padding: 8px 14px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.refresh:hover { border-color: var(--color-primary); color: var(--color-primary); }
+.compare-error { color: var(--color-danger); font-size: 13px; }
+.compare-metrics {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 14px;
+  margin: 18px 0;
+}
+.compare-metrics div {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+  box-shadow: var(--shadow-sm);
+  padding: 14px 16px;
+}
+.compare-metrics dt { color: var(--color-text-muted); font-size: var(--text-xs); letter-spacing: 0.05em; }
+.compare-metrics dd {
+  margin: 6px 0 0;
+  font-family: var(--font-display);
+  font-size: 20px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.compare-chart {
+  width: 100%;
+  height: 320px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+  box-shadow: var(--shadow-sm);
+}
+.compare-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+  margin-top: 12px;
+  font-variant-numeric: tabular-nums;
+}
+.compare-table th {
+  text-align: left;
+  color: var(--color-primary);
+  font-weight: 600;
+  background: var(--color-primary-soft);
+  border: 1px solid var(--color-hairline);
+  padding: 7px 10px;
+}
+.compare-table td { border: 1px solid var(--color-hairline); padding: 7px 10px; }
+.compare-table tbody tr:nth-child(even) { background: rgba(28, 42, 34, 0.025); }
+.compare-limits { margin: 12px 0 0; padding-left: 1.1em; color: var(--color-text-muted); font-size: 12px; }
+.compare-empty, .compare-note {
+  color: var(--color-text-secondary);
+  font-size: 13px;
+  border: 1px dashed var(--color-border);
+  border-radius: var(--radius-md);
+  padding: 14px 16px;
+  background: var(--color-surface);
+}
 </style>

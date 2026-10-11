@@ -12,7 +12,18 @@ from typing import Any
 
 from langgraph.checkpoint.memory import MemorySaver
 
-from app.agents.graphs.state import IntentResult, RewrittenQuery
+from app.agents.graphs.state import (
+    ChatResult,
+    IntentResult,
+    PortfolioResult,
+    ProductResult,
+    RewrittenQuery,
+    StockResult,
+    AnswerPlan,
+    PlanPoint,
+    PlanSection,
+    SupervisorDecision,
+)
 from tests.test_agents.memory_store import MemoryAdvisorStore  # 复用语义对齐的存储替身
 
 
@@ -27,16 +38,20 @@ class ScriptedModel:
         *,
         classify_error: Exception | None = None,
         rewrite_error: Exception | None = None,
+        slot_values: dict | None = None,
     ) -> None:
         self.intent = intent
         self.answers = list(answers)
         self.rewritten = rewritten
         self.classify_error = classify_error
         self.rewrite_error = rewrite_error
+        self.slot_values = slot_values or {}
         self.structured_method = None
         self.compliance_inputs: list = []
         self.rewrite_inputs: list = []
         self.classify_inputs: list = []
+        #: 骨架阶段确定的成文内容：可见阶段（astream）据此产出，避免重复消费脚本答案。
+        self.current_prose = ""
 
     def with_structured_output(self, schema, *, method=None, **kwargs):
         self.structured_method = method
@@ -44,6 +59,24 @@ class ScriptedModel:
 
         class _Structured:
             async def ainvoke(self, messages, config=None):
+                from app.agents.slots import SlotExtraction, SlotPatch, _fallback_patch
+                if schema is SlotExtraction:
+                    import json
+                    data = json.loads(messages[-1]["content"])
+                    domain = next(name for name in ("stock_agent", "product_agent", "portfolio_agent") if name in messages[0]["content"])
+                    if domain in parent.slot_values:
+                        return SlotExtraction(domain=domain, patch=SlotPatch(set_values=parent.slot_values[domain]))
+                    return _fallback_patch(domain, data["query"], "eval")
+                if schema is SupervisorDecision:
+                    return SupervisorDecision()
+                if schema is AnswerPlan:
+                    parent.compliance_inputs.append(list(messages))
+                    text = parent.answers.pop(0) if parent.answers else "没有更多材料。"
+                    from app.agents.graphs.task_agent import parse_recommendations
+                    prose = text.split("推荐代码:")[0].strip()
+                    parent.current_prose = prose
+                    sections = [PlanSection(points=[PlanPoint(point=prose)])] if prose else []
+                    return AnswerPlan(sections=sections, recommendations=parse_recommendations(text))
                 if schema is RewrittenQuery:
                     parent.rewrite_inputs.append(list(messages))
                     if parent.rewrite_error is not None:
@@ -58,30 +91,40 @@ class ScriptedModel:
 
     async def astream(self, messages, config=None):
         self.compliance_inputs.append(messages)
-        text = self.answers.pop(0) if self.answers else "没有更多材料。"
+        # 有骨架时按骨架成文；未走骨架（例如 legacy 路径）则回退到脚本答案。
+        text = self.current_prose or (self.answers.pop(0) if self.answers else "没有更多材料。")
         yield SimpleNamespace(content=text)
 
 
 def fake_specialist(name: str, *, content: str = "", codes: list[str] | None = None,
                     error: Exception | None = None, warning: str = "",
                     failed: bool = False, candidates: list[dict] | None = None,
-                    artifacts: list[dict] | None = None, delay: float = 0.0):
-    async def run(task: str, state: dict) -> dict:
+                    stock_result: Any = None, delay: float = 0.0):
+    """按 agent 名产出对应类型的结构化结果，语义对齐 tests 的 ``_specialist``。"""
+
+    async def run(task: str, state: dict):
         if delay:
             await asyncio.sleep(delay)
         if error is not None:
             raise error
-        return {
-            "agent": name,
-            "content": content or f"{name}:{task}",
-            "recommended_product_codes": list(codes or []),
-            "candidate_stocks": list(candidates or []),
-            "artifacts": list(artifacts or []),
-            "warnings": [warning] if warning else [],
-            "source": "fake",
-            "as_of": "2026-09-28T00:00:00Z",
-            "failed": failed,
-        }
+        status = "failed" if failed else "ok"
+        summary = content or f"{name}:{task}"
+        warnings = [warning] if warning else []
+        common = {"status": status, "summary": summary, "warnings": warnings,
+                  "source": "fake", "as_of": "2026-09-28T00:00:00Z"}
+        if name == "stock_agent":
+            from app.agents.stock.contracts import CandidateStock
+
+            return StockResult(
+                **common,
+                result=stock_result,
+                candidates=[CandidateStock.model_validate(item) for item in (candidates or [])],
+            )
+        if name == "product_agent":
+            return ProductResult(**common, recommended_codes=list(codes or []))
+        if name == "portfolio_agent":
+            return PortfolioResult(**common, recommended_codes=list(codes or []))
+        return ChatResult(**common)
 
     return run
 

@@ -6,11 +6,13 @@ from collections import defaultdict
 import re
 from typing import Any
 
+from app.agents.graphs.state import StockResult
 from app.agents.stock.contracts import StockAgentResponse, StockRequest, StockResultV1
 from app.agents.stock.evidence_store import EvidenceAccessError
 from app.agents.stock.render import render_stock_result
+from app.agents.compliance_guard import numeric_claims
 
-_NUMBER = re.compile(r"(?<![\w.])-?\d+(?:\.\d+)?")
+_NUMBER = re.compile(r"(?<![A-Za-z0-9_.])-?\d+(?:\.\d+)?")
 
 
 def _payload(row: dict[str, Any]) -> dict[str, Any]:
@@ -24,14 +26,13 @@ def _symbol(payload: dict[str, Any]) -> str:
     return str(payload.get("thscode") or payload.get("ts_code") or payload.get("symbol") or "")
 
 
-def _generic_failure(response: StockAgentResponse, warning: str) -> dict[str, Any]:
-    return {
-        "agent": "stock_agent",
-        "content": "缺少可验证的实时证据，仅能提供通用定性说明。",
-        "recommended_product_codes": [], "candidate_stocks": [], "artifacts": [],
-        "warnings": list(dict.fromkeys([*response.warnings, warning])),
-        "source": "", "as_of": "", "failed": False,
-    }
+def _generic_failure(response: StockAgentResponse, warning: str) -> StockResult:
+    """无证据时的降级结果：有产出（通用定性说明），但不算整轮失败。"""
+    return StockResult(
+        status="degraded",
+        summary="缺少可验证的实时证据，仅能提供通用定性说明。",
+        warnings=list(dict.fromkeys([*response.warnings, warning])),
+    )
 
 
 def _numbers(value: Any) -> set[str]:
@@ -55,14 +56,21 @@ def _numbers(value: Any) -> set[str]:
 
 
 def _guard_summary(summary: str, evidence_rows: list[dict[str, Any]]) -> tuple[str, bool]:
-    claimed = _numbers(summary)
     supported = _numbers([row.get("payload") for row in evidence_rows])
-    if claimed - supported:
-        return "已获取并校验相关证据，数值细节请以结构化结果为准。", True
-    return summary, False
+    changed, pieces = False, []
+    for part in re.findall(r"[^。！？；\n]*[。！？；\n]|[^。！？；\n]+$", summary):
+        claims = numeric_claims(part)
+        if any(not _NUMBER.fullmatch(value) or format(float(value), ".12g") not in supported for value in claims):
+            changed = True
+            continue
+        pieces.append(part)
+    text = "".join(pieces).strip()
+    if not text and changed:
+        text = "已获取相关证据，具体数值请查看结构化结果。"
+    return text if changed else summary, changed
 
 
-def assemble_stock_result(response: StockAgentResponse | dict[str, Any], context: Any, store: Any) -> dict[str, Any]:
+def assemble_stock_result(response: StockAgentResponse | dict[str, Any], context: Any, store: Any) -> StockResult:
     parsed = response if isinstance(response, StockAgentResponse) else StockAgentResponse.model_validate(response)
     rows = []
     try:
@@ -82,6 +90,7 @@ def assemble_stock_result(response: StockAgentResponse | dict[str, Any], context
         if not found or found.get("failed") or not found.get("indices"):
             return _generic_failure(parsed, "missing_market_aggregate")
         kwargs["market_overview"] = found
+        warnings.extend(found.get("warnings") or [])
     elif parsed.scenario == "stock_screening":
         found = next((_payload(row) for row in reversed(rows) if row.get("evidence_type") == "stock_screening"), None)
         if not found or not found.get("candidates"):

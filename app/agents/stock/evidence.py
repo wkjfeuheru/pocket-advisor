@@ -66,8 +66,10 @@ _COMPONENTS = {
 
 
 _INDEX = _object({
-    "thscode": None, "name": None, "last": None, "change_pct": None, "source": None, "as_of": None,
+    "thscode": None, "name": None, "last": None, "change_pct": None, "turnover": None, "source": None, "as_of": None,
 })
+_HISTORY_INDEX = _object({"thscode": None, "name": None, "first_close": None, "last_close": None,
+    "change_pct": None, "start_date": None, "as_of": None, "source": None, "coverage": None})
 _BREADTH = _object({
     "up": None, "down": None, "unchanged": None, "turnover": None, "limit_up": None,
     "limit_down": None, "continue_board": None, "broken_board": None, "source": None, "as_of": None,
@@ -107,6 +109,8 @@ _SCREENING = _object({
 })
 _MARKET = _object({
     "failed": None, "indices": _list(_INDEX), "breadth": _BREADTH, "sectors": _SECTORS,
+    "last_calendar_trade_date": None, "snapshot_time": None,
+    "historical_indices": _list(_HISTORY_INDEX),
     "as_of": None, "sources": None, "warnings": None, "sentiment_input": None, "risks": None,
 })
 _RESULT = _object({

@@ -10,6 +10,8 @@ from typing import Annotated, Any
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import InjectedToolArg, tool
 
+from app.agents.evidence import capture_evidence, current_execution, product_access_allowed
+
 _library: ContextVar[Any] = ContextVar("advisor_product_library", default=None)
 _portfolio: ContextVar[Any] = ContextVar("advisor_portfolio_service", default=None)
 
@@ -28,14 +30,15 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _dump(payload: dict[str, Any]) -> str:
-    return json.dumps(payload, ensure_ascii=False, default=str)
+def _dump(payload: dict[str, Any], *, tool_name: str = "unavailable", arguments: Any = None) -> str:
+    return json.dumps(capture_evidence(payload, tool_name=tool_name, arguments=arguments),
+                      ensure_ascii=False, default=str)
 
 
 def _unavailable(source: str, warning: str) -> str:
     return _dump({
         "source": source,
-        "as_of": _now(),
+        "as_of": "",
         "data": None,
         "warning": warning,
     })
@@ -51,6 +54,9 @@ def _customer_id(config: RunnableConfig) -> str:
 @tool
 def list_products(product_type: str = "fund") -> str:
     """列出上架商品。product_type 取 fund（基金）、etf（ETF）或 wealth（理财产品）。"""
+    execution = current_execution()
+    if execution is not None and execution.domain_slots.get("product_type") and product_type != execution.domain_slots["product_type"]:
+        return _unavailable("", "product_type_outside_confirmed_slots")
     library = _library.get()
     if library is None:
         return _unavailable("product_library", "商品库不可用，未编造商品数据")
@@ -66,12 +72,15 @@ def list_products(product_type: str = "fund") -> str:
             "risk_level": basic.get("risk_level") or "",
             "is_active": summary.get("is_active", True),
         })
-    return _dump({"source": "postgresql", "as_of": _now(), "data": items, "warning": ""})
+    return _dump({"source": "postgresql", "as_of": _now(), "data": items, "warning": ""},
+                 tool_name="list_products", arguments={"product_type": product_type})
 
 
 @tool
 def get_product_detail(product_code: str) -> str:
     """按商品代码读取详情。代码不存在时返回警告，不编造商品。"""
+    if not product_access_allowed(str(product_code).strip()):
+        return _unavailable("", "product_outside_confirmed_slots")
     library = _library.get()
     if library is None:
         return _unavailable("product_library", "商品库不可用，未编造商品数据")
@@ -83,13 +92,16 @@ def get_product_detail(product_code: str) -> str:
         "source": "postgresql",
         "as_of": str(basic.get("as_of") or _now()),
         "data": basic,
+        "subject": str(product_code),
         "warning": "",
-    })
+    }, tool_name="get_product_detail", arguments={"product_code": product_code})
 
 
 @tool
 def get_product_performance(product_code: str) -> str:
     """读取商品业绩与净值。没有业绩时明确警告。"""
+    if not product_access_allowed(str(product_code).strip()):
+        return _unavailable("", "product_outside_confirmed_slots")
     library = _library.get()
     if library is None:
         return _unavailable("product_library", "商品库不可用，未编造业绩")
@@ -101,20 +113,25 @@ def get_product_performance(product_code: str) -> str:
         "source": str(performance.get("source") or "postgresql"),
         "as_of": str(performance.get("as_of") or performance.get("update_date") or ""),
         "data": performance,
+        "subject": str(product_code),
+        "units": {"nav": "元"},
         "warning": "" if performance.get("nav") is not None else "净值缺失，未编造净值",
-    })
+    }, tool_name="get_product_performance", arguments={"product_code": product_code})
 
 
 @tool
 def get_product_holdings(product_code: str) -> str:
     """读取商品重仓。没有披露时返回空列表和警告。"""
+    if not product_access_allowed(str(product_code).strip()):
+        return _unavailable("", "product_outside_confirmed_slots")
     library = _library.get()
     if library is None or not hasattr(library, "list_holdings"):
         return _unavailable("product_library", "重仓不可用，未编造持仓")
     rows = library.list_holdings(str(product_code or "").strip()) or []
     as_of = str(rows[0].get("as_of") or "") if rows else ""
     warning = "" if rows else "没有披露重仓，未编造持仓"
-    return _dump({"source": "postgresql", "as_of": as_of, "data": rows, "warning": warning})
+    return _dump({"source": "postgresql", "as_of": as_of, "data": rows, "subject": str(product_code),
+                  "warning": warning}, tool_name="get_product_holdings", arguments={"product_code": product_code})
 
 
 @tool
@@ -133,8 +150,9 @@ def get_account_snapshot(config: Annotated[RunnableConfig, InjectedToolArg]) -> 
         "source": "postgresql",
         "as_of": str((payload or {}).get("updated_at") or _now()),
         "data": payload,
+        "subject": customer_id,
         "warning": "",
-    })
+    }, tool_name="get_account_snapshot")
 
 
 @tool
@@ -149,7 +167,8 @@ def list_positions(config: Annotated[RunnableConfig, InjectedToolArg]) -> str:
         return _unavailable("portfolio", "缺少受信任的客户上下文，未读取持仓")
     rows = portfolio.list_positions(customer_id)
     data = [row.model_dump(mode="json") if hasattr(row, "model_dump") else row for row in rows]
-    return _dump({"source": "postgresql", "as_of": _now(), "data": data, "warning": ""})
+    return _dump({"source": "postgresql", "as_of": _now(), "data": data, "subject": customer_id,
+                  "warning": ""}, tool_name="list_positions")
 
 
 TOOLS = [

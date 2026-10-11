@@ -29,6 +29,40 @@ const sellKey = ref('')
 const pricingIssues = computed(() => account.value?.pricing_issues ?? [])
 const hasUnpriced = computed(() => account.value?.market_value_complete === false)
 
+/** 环形图配色：深绿系为主、金铜作强调，与整体设计令牌一致。 */
+const DONUT_COLORS = ['#17362a', '#23543d', '#3f7a58', '#b9893f', '#d5ac67', '#8b9086']
+
+/** 前 5 大持仓 + "其他"，占比按持仓权重归一，避免口径不完整时画不满一圈。 */
+const donutItems = computed(() => {
+  const ranked = positions.value
+    .map((item) => ({
+      name: item.product_name || item.product_code,
+      weight: Number(item.weight) || 0,
+    }))
+    .filter((item) => item.weight > 0)
+    .sort((left, right) => right.weight - left.weight)
+  const top = ranked.slice(0, 5)
+  const restWeight = ranked.slice(5).reduce((sum, item) => sum + item.weight, 0)
+  const items = restWeight > 0 ? [...top, { name: '其他', weight: restWeight }] : top
+  const total = items.reduce((sum, item) => sum + item.weight, 0) || 1
+  return items.map((item) => ({ ...item, share: item.weight / total, weight: item.weight }))
+})
+
+/** 转成 SVG 圆环所需的分段（周长按 100 处理，dashoffset 从正上方起算）。 */
+const donutSegments = computed(() => {
+  let cursor = 0
+  return donutItems.value.map((item, index) => {
+    const segment = {
+      ...item,
+      color: DONUT_COLORS[index % DONUT_COLORS.length],
+      dash: `${(item.share * 100).toFixed(3)} ${(100 - item.share * 100).toFixed(3)}`,
+      offset: 25 - cursor * 100,
+    }
+    cursor += item.share
+    return segment
+  })
+})
+
 async function load() {
   loading.value = true
   loadError.value = ''
@@ -157,7 +191,7 @@ onMounted(load)
       :description="`以下商品未计入市值：${pricingIssues.join('、')}`"
     />
 
-    <div v-if="account" class="stat-row">
+    <div v-if="account" class="stat-grid">
       <div class="stat">
         <span class="stat-label">持仓市值</span>
         <strong>{{ formatMoney(account.market_value, '元') }}</strong>
@@ -175,6 +209,43 @@ onMounted(load)
         <strong>{{ account.position_count }} 只</strong>
       </div>
     </div>
+
+    <!-- 持仓结构：环形图给出集中度直觉，明细仍以表格为准 -->
+    <section v-if="positions.length" class="allocation">
+      <div class="allocation-head">
+        <p class="eyebrow">ALLOCATION</p>
+        <h3>持仓结构</h3>
+      </div>
+      <div class="allocation-body">
+        <figure class="donut">
+          <svg viewBox="0 0 42 42" role="img" aria-label="持仓占比分布">
+            <circle class="donut-track" cx="21" cy="21" r="15.9155" />
+            <circle
+              v-for="segment in donutSegments"
+              :key="segment.name"
+              class="donut-seg"
+              cx="21"
+              cy="21"
+              r="15.9155"
+              :stroke="segment.color"
+              :stroke-dasharray="segment.dash"
+              :stroke-dashoffset="segment.offset"
+            />
+          </svg>
+          <figcaption>
+            <strong>{{ formatMoney(account?.market_value, '元') }}</strong>
+            <span>持仓市值</span>
+          </figcaption>
+        </figure>
+        <ul class="legend">
+          <li v-for="segment in donutSegments" :key="segment.name">
+            <i :style="{ background: segment.color }"></i>
+            <span class="legend-name">{{ segment.name }}</span>
+            <b>{{ formatShare(segment.weight) }}</b>
+          </li>
+        </ul>
+      </div>
+    </section>
 
     <el-card shadow="never" v-loading="loading" class="table-card">
       <el-empty
@@ -293,23 +364,10 @@ onMounted(load)
 </template>
 
 <style scoped>
-.page { flex: 1; min-height: 0; overflow: auto; padding: 24px; }
-.table-card :deep(.el-card__body) { overflow: visible; }
-.table-card :deep(.el-table) { width: 100%; }
+/* 页面骨架 / 指标卡 / 表格容器 / 盈亏配色等通用样式已提升到全局 style.css，
+   这里只保留本页特有的微调，避免与全局规则重复。 */
 .table-card :deep(.el-table__body-wrapper) { min-height: 48px; }
-.page-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 16px; }
-.eyebrow { margin: 0 0 6px; color: var(--color-text-muted); font: 10px/1 var(--font-mono); letter-spacing: .1em; }
-.page-head h2 { margin: 0 0 6px; font-size: 20px; color: var(--color-text); }
-.page-note { margin: 0; color: var(--color-text-secondary); font-size: 12px; }
-.page-tools { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
-.warn-alert { border-radius: 0; margin-bottom: 12px; }
 
-.stat-row { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 16px; }
-.stat { display: flex; flex-direction: column; gap: 6px; border: 1px solid var(--color-border); background: var(--color-surface); padding: 14px 16px; }
-.stat-label { color: var(--color-text-muted); font-size: 11px; }
-.stat strong { font-size: 18px; font-weight: 600; }
-
-.table-card { border: 1px solid var(--color-border); border-radius: 0; box-shadow: none; }
 .product-cell { display: flex; flex-direction: column; gap: 2px; }
 .product-cell small { color: var(--color-text-muted); font-size: 11px; }
 .mono { color: var(--color-text-muted); font: 11px/1 var(--font-mono); }
@@ -319,18 +377,80 @@ onMounted(load)
 .sell-meta { margin: 0; display: grid; grid-template-columns: 1fr 1fr; gap: 8px 16px; }
 .sell-meta div { display: flex; flex-direction: column; gap: 2px; }
 .sell-meta dt { color: var(--color-text-muted); font-size: 11px; }
-.sell-meta dd { margin: 0; font-size: 13px; }
+.sell-meta dd { margin: 0; font-size: 13px; font-variant-numeric: tabular-nums; }
 
-/* 盈亏配色：涨绿跌红（A 股习惯），0 与缺失用中性色 */
-:deep(.pnl-up) { color: var(--color-success); }
-:deep(.pnl-down) { color: var(--color-danger); }
-:deep(.pnl-flat) { color: var(--color-text-secondary); }
+/* 持仓结构：纯 SVG 圆环（周长按 100 计，首段从正上方起算） */
+.allocation {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-bottom: 20px;
+  padding: 16px 18px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+  box-shadow: var(--shadow-sm);
+}
+.allocation-head h3 {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: var(--text-lg);
+  font-weight: 600;
+  color: var(--color-primary);
+}
+.allocation-body { display: flex; align-items: center; gap: 28px; flex-wrap: wrap; }
+.donut { position: relative; width: 168px; margin: 0; flex-shrink: 0; }
+.donut svg { display: block; width: 100%; }
+.donut-track { fill: none; stroke: var(--color-surface-alt); stroke-width: 5.2; }
+.donut-seg { fill: none; stroke-width: 5.2; transition: stroke-dasharray 0.5s ease; }
+.donut figcaption {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  text-align: center;
+}
+.donut figcaption strong {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 14px;
+  color: var(--color-primary);
+}
+.donut figcaption span { font-size: var(--text-xs); color: var(--color-text-muted); }
+
+.legend {
+  flex: 1;
+  min-width: 200px;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 6px 18px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.legend li { display: flex; align-items: center; gap: 8px; font-size: var(--text-sm); }
+.legend i { width: 9px; height: 9px; border-radius: 2px; flex-shrink: 0; }
+.legend-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--color-text-secondary);
+}
+.legend b {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--color-text);
+}
 
 @media (max-width: 980px) {
-  .stat-row { grid-template-columns: repeat(2, 1fr); }
+  .stat-grid { grid-template-columns: repeat(2, 1fr); }
 }
 @media (max-width: 768px) {
-  .page { padding: 16px 12px; }
   .page-head { flex-direction: column; }
   .page-tools { width: 100%; }
 }

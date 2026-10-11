@@ -37,3 +37,8 @@ Thumbs.db
 .trae/
 # pip 临时目录（沙箱下可能因 ACL 无法删除，至少不要提交）
 .piptmp/
+
+# 工具产生的状态/缓存目录（可再生，不入库）
+.mimosa/
+frontend/.mimosa/
+frontend/.npmtmp/

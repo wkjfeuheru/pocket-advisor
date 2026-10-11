@@ -1,24 +1,69 @@
-/* 全局样式：金融智能投顾系统 —— 技术极简金融主题 */
+/* 全局样式：金融智能投顾系统 —— 「编辑部金融」视觉语言
+ *
+ * 设计要点：
+ * - 象牙纸底 + 深绿墨色 + 金铜高亮，细网格纸衬底；
+ * - 标题用中文衬线（编辑部气质），数字统一等宽表格数（tabular-nums）；
+ * - 克制圆角与轻层次阴影，替换原先"零圆角零阴影"的极简；
+ * - 不引入任何外部字体，全部走系统字体回退，保证离线/Docker 部署可用。
+ */
 
+/* ── 设计令牌 ─────────────────────────────────────────────── */
 :root {
-  --color-primary: #1a3c2b;
-  --color-primary-light: #24533b;
-  --color-primary-soft: #e8efe9;
-  --color-bg: #f7f7f5;
-  --color-surface: #ffffff;
-  --color-surface-alt: #f1f2ee;
-  --color-border: rgba(58, 58, 56, 0.2);
-  --color-text: #202320;
-  --color-text-secondary: #62665f;
-  --color-text-muted: #8a8f87;
-  --color-success: #26734a;
-  --color-danger: #b74432;
-  --color-user-bubble: #1a3c2b;
-  --color-assistant-bubble: #ffffff;
-  --shadow-card: none;
-  --font-mono: 'SFMono-Regular', Consolas, 'Liberation Mono', monospace;
+  /* 色板：深绿墨色主色 + 金铜强调 */
+  --color-primary: #17362a;
+  --color-primary-light: #23543d;
+  --color-primary-soft: #e7efe8;
+  --color-accent: #b9893f;
+  --color-accent-soft: #f4ead6;
+
+  --color-bg: #f5f3ec;
+  --color-surface: #fffefb;
+  --color-surface-alt: #efece3;
+
+  --color-border: rgba(28, 42, 34, 0.16);
+  --color-hairline: rgba(28, 42, 34, 0.09);
+  --grid-line: rgba(28, 42, 34, 0.055);
+
+  --color-text: #1b201c;
+  --color-text-secondary: #5d6359;
+  --color-text-muted: #8b9086;
+
+  --color-success: #2c7a53;
+  --color-danger: #b3442f;
+
+  --color-user-bubble: #17362a;
+  --color-assistant-bubble: #fffefb;
+
+  /* 字体：衬线标题 / 无衬线正文 / 等宽数字 */
+  --font-display: 'Songti SC', 'Noto Serif SC', 'Source Han Serif SC', 'Source Han Serif CN',
+    STSong, SimSun, 'Times New Roman', serif;
+  --font-body: 'PingFang SC', 'Microsoft YaHei', 'Hiragino Sans GB', 'Helvetica Neue',
+    Helvetica, Arial, sans-serif;
+  --font-mono: 'IBM Plex Mono', 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo,
+    'Courier New', monospace;
+
+  /* 字号阶梯 */
+  --text-xs: 11px;
+  --text-sm: 12px;
+  --text-base: 14px;
+  --text-md: 15px;
+  --text-lg: 18px;
+  --text-xl: 22px;
+  --text-2xl: 28px;
+  --text-3xl: 40px;
+
+  /* 圆角与阴影：克制但有层次 */
+  --radius-sm: 3px;
+  --radius: 6px;
+  --radius-md: 10px;
+  --radius-lg: 16px;
+  --shadow-sm: 0 1px 2px rgba(20, 32, 24, 0.05);
+  --shadow-md: 0 10px 28px -18px rgba(20, 32, 24, 0.45);
+  --shadow-lg: 0 24px 60px -34px rgba(20, 32, 24, 0.55);
+  --shadow-card: var(--shadow-sm);
 }
 
+/* ── 基础重置 ─────────────────────────────────────────────── */
 * {
   box-sizing: border-box;
 }
@@ -32,22 +77,34 @@ body,
 }
 
 body {
-  font-family: 'PingFang SC', 'Microsoft YaHei', 'Hiragino Sans GB', 'Helvetica Neue',
-    Helvetica, Arial, sans-serif;
-  background: var(--color-bg);
+  font-family: var(--font-body);
+  background-color: var(--color-bg);
   color: var(--color-text);
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
-  font-size: 14px;
-  line-height: 1.6;
+  font-size: var(--text-base);
+  line-height: 1.65;
+  /* 细网格纸衬底：固定 88px 网格 + 极轻的角部渐晕，避免大面积纯色带来的廉价感。 */
   background-image:
-    linear-gradient(var(--color-border) 1px, transparent 1px),
-    linear-gradient(90deg, var(--color-border) 1px, transparent 1px);
-  background-size: 96px 96px;
+    linear-gradient(var(--grid-line) 1px, transparent 1px),
+    linear-gradient(90deg, var(--grid-line) 1px, transparent 1px),
+    radial-gradient(circle at 18% 0%, rgba(185, 137, 63, 0.07), transparent 42%);
+  background-size: 88px 88px, 88px 88px, 100% 100%;
 }
 
-button, input, textarea, a { outline-offset: 3px; }
-button:focus-visible, input:focus-visible, textarea:focus-visible, a:focus-visible {
+button,
+input,
+textarea,
+a,
+select {
+  font: inherit;
+  outline-offset: 3px;
+}
+button:focus-visible,
+input:focus-visible,
+textarea:focus-visible,
+select:focus-visible,
+a:focus-visible {
   outline: 2px solid var(--color-primary);
 }
 
@@ -56,52 +113,360 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, a:focus-visib
   flex-direction: column;
 }
 
-/* 滚动条美化 */
+/* ── 滚动条 ───────────────────────────────────────────────── */
 ::-webkit-scrollbar {
-  width: 8px;
-  height: 8px;
+  width: 9px;
+  height: 9px;
 }
 ::-webkit-scrollbar-track {
   background: transparent;
 }
 ::-webkit-scrollbar-thumb {
-  background: #cbd5e1;
-  border-radius: 4px;
+  background: rgba(28, 42, 34, 0.18);
+  border-radius: 999px;
+  border: 2px solid transparent;
+  background-clip: content-box;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: #94a3b8;
+  background: rgba(28, 42, 34, 0.34);
+  background-clip: content-box;
 }
 
-/* 通用工具类 */
-.app-title {
-  font-size: 20px;
-  font-weight: 700;
-  letter-spacing: 1px;
-  color: #ffffff;
+/* ── 通用工具类 ───────────────────────────────────────────── */
+.num {
+  font-variant-numeric: tabular-nums;
+}
+.mono {
+  font-family: var(--font-mono);
+  color: var(--color-text-muted);
 }
 
-/* Element Plus 主题色覆盖 */
-:root {
-  --el-color-primary: #1a3c2b;
-  --el-color-primary-light-3: #527561;
-  --el-color-primary-light-5: #88a092;
-  --el-color-primary-light-7: #bdcbbf;
-  --el-color-primary-light-8: #d6ded7;
-  --el-color-primary-light-9: #e8efe9;
-  --el-color-primary-dark-2: #10271b;
-  --el-border-radius-base: 4px;
+/* 页面骨架：各业务页复用，避免在每个文件里重复一份。 */
+.page {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 28px 28px 48px;
 }
-
-/* 段落与 markdown 文本渲染 */
-.markdown-body {
-  white-space: pre-wrap;
-  word-break: break-word;
-  line-height: 1.75;
+.page-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 20px;
 }
-
-.markdown-body p {
+.eyebrow {
   margin: 0 0 8px;
+  color: var(--color-text-muted);
+  font: var(--text-xs) / 1 var(--font-mono);
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
 }
-.markdown-body p:last-child {
+.page-head h2 {
+  margin: 0 0 6px;
+  font-family: var(--font-display);
+  font-size: var(--text-2xl);
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  color: var(--color-primary);
+}
+.page-note {
+  margin: 0;
+  color: var(--color-text-secondary);
+  font-size: var(--text-sm);
+  max-width: 780px;
+}
+.page-tools {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+  flex-wrap: wrap;
+}
+
+/* 指标卡：深绿主卡 + 象牙副卡 */
+.stat-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 14px;
+  margin-bottom: 20px;
+}
+.stat {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 16px 18px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+  box-shadow: var(--shadow-sm);
+}
+.stat::before {
+  content: '';
+  position: absolute;
+  left: 18px;
+  top: 0;
+  width: 26px;
+  height: 2px;
+  background: var(--color-accent);
+}
+.stat.primary {
+  background: linear-gradient(158deg, var(--color-primary-light), var(--color-primary));
+  border-color: transparent;
+  color: #fff;
+}
+.stat.primary::before {
+  background: var(--color-accent);
+}
+.stat.primary .stat-label {
+  color: rgba(255, 255, 255, 0.72);
+}
+.stat.primary strong {
+  color: #fff;
+}
+.stat-label {
+  color: var(--color-text-muted);
+  font-size: var(--text-xs);
+  letter-spacing: 0.05em;
+}
+.stat strong {
+  font-family: var(--font-display);
+  font-size: 24px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.15;
+}
+.stat small {
+  font-size: var(--text-xs);
+  font-variant-numeric: tabular-nums;
+}
+
+/* 表格容器 */
+.table-card {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-sm);
+}
+.table-card .el-card__body {
+  overflow: visible;
+}
+.table-card .el-table {
+  width: 100%;
+  --el-table-border-color: var(--color-hairline);
+  --el-table-header-bg-color: transparent;
+  --el-table-header-text-color: var(--color-text-muted);
+  --el-table-row-hover-bg-color: var(--color-primary-soft);
+  --el-table-bg-color: transparent;
+  --el-table-tr-bg-color: transparent;
+  font-variant-numeric: tabular-nums;
+}
+.table-card .el-table th.el-table__cell {
+  font-weight: 600;
+  letter-spacing: 0.05em;
+}
+.warn-alert {
+  border-radius: var(--radius);
+  margin-bottom: 14px;
+}
+
+/* 盈亏配色：涨绿跌红（A 股习惯），0 与缺失用中性色。
+   这里用全局选择器（非 scoped），才能命中 Element Plus 表格单元格内部节点。 */
+.pnl-up {
+  color: var(--color-success);
+}
+.pnl-down {
+  color: var(--color-danger);
+}
+.pnl-flat {
+  color: var(--color-text-secondary);
+}
+
+/* 统一入场动效 */
+@keyframes riseIn {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+.rise-in {
+  animation: riseIn 0.42s cubic-bezier(0.22, 0.61, 0.36, 1) both;
+}
+@media (prefers-reduced-motion: reduce) {
+  .rise-in {
+    animation: none;
+  }
+}
+
+/* ── Element Plus 主题覆盖 ───────────────────────────────── */
+:root {
+  --el-color-primary: #17362a;
+  --el-color-primary-light-3: #4d6f5c;
+  --el-color-primary-light-5: #7f9a8b;
+  --el-color-primary-light-7: #b3c4b8;
+  --el-color-primary-light-8: #ccd8cf;
+  --el-color-primary-light-9: #e7efe8;
+  --el-color-primary-dark-2: #0d2018;
+  --el-border-radius-base: 6px;
+  --el-border-radius-small: 4px;
+  --el-font-size-base: 14px;
+}
+
+.el-card {
+  border-radius: var(--radius-md);
+}
+.el-button {
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+.el-button--primary {
+  --el-button-bg-color: var(--color-primary);
+  --el-button-border-color: var(--color-primary);
+  --el-button-hover-bg-color: var(--color-primary-light);
+  --el-button-hover-border-color: var(--color-primary-light);
+}
+.el-dialog {
+  border-radius: var(--radius-md);
+  overflow: hidden;
+}
+.el-dialog__title {
+  font-family: var(--font-display);
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+.el-tabs__item.is-active,
+.el-tabs__item:hover {
+  font-weight: 600;
+}
+.el-tag {
+  border-radius: var(--radius-sm);
+}
+
+/* ── Markdown 渲染：模型自由文本的排版基准 ───────────────── */
+.markdown-body {
+  color: var(--color-text);
+  font-size: var(--text-base);
+  line-height: 1.78;
+  word-break: break-word;
+}
+.markdown-body > *:first-child {
+  margin-top: 0;
+}
+.markdown-body > *:last-child {
   margin-bottom: 0;
+}
+.markdown-body p {
+  margin: 0 0 10px;
+}
+.markdown-body h1,
+.markdown-body h2,
+.markdown-body h3,
+.markdown-body h4,
+.markdown-body h5,
+.markdown-body h6 {
+  font-family: var(--font-display);
+  color: var(--color-primary);
+  line-height: 1.3;
+  margin: 20px 0 10px;
+  letter-spacing: 0.01em;
+}
+.markdown-body h1 {
+  font-size: var(--text-xl);
+}
+.markdown-body h2 {
+  font-size: var(--text-lg);
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--color-hairline);
+}
+.markdown-body h3 {
+  font-size: var(--text-md);
+}
+.markdown-body h4,
+.markdown-body h5,
+.markdown-body h6 {
+  font-size: var(--text-base);
+}
+.markdown-body ul,
+.markdown-body ol {
+  margin: 0 0 10px;
+  padding-left: 1.35em;
+}
+.markdown-body li {
+  margin: 3px 0;
+}
+.markdown-body li::marker {
+  color: var(--color-accent);
+}
+.markdown-body strong {
+  font-weight: 700;
+  color: var(--color-primary);
+}
+.markdown-body em {
+  font-style: italic;
+}
+.markdown-body a {
+  color: var(--color-primary-light);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.markdown-body code {
+  font-family: var(--font-mono);
+  font-size: 0.88em;
+  background: var(--color-primary-soft);
+  color: var(--color-primary);
+  padding: 1px 5px;
+  border-radius: var(--radius-sm);
+}
+.markdown-body pre {
+  margin: 0 0 12px;
+  padding: 12px 14px;
+  overflow: auto;
+  background: #10231b;
+  color: #e8efe9;
+  border-radius: var(--radius);
+}
+.markdown-body pre code {
+  background: transparent;
+  color: inherit;
+  padding: 0;
+}
+.markdown-body blockquote {
+  margin: 0 0 12px;
+  padding: 6px 14px;
+  border-left: 3px solid var(--color-accent);
+  background: var(--color-accent-soft);
+  color: var(--color-text-secondary);
+}
+.markdown-body hr {
+  border: 0;
+  border-top: 1px solid var(--color-hairline);
+  margin: 18px 0;
+}
+.markdown-body table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 0 0 12px;
+  font-size: var(--text-sm);
+  font-variant-numeric: tabular-nums;
+}
+.markdown-body table th {
+  text-align: left;
+  font-weight: 600;
+  color: var(--color-primary);
+  background: var(--color-primary-soft);
+  border: 1px solid var(--color-hairline);
+  padding: 7px 10px;
+  white-space: nowrap;
+}
+.markdown-body table td {
+  border: 1px solid var(--color-hairline);
+  padding: 7px 10px;
+  vertical-align: top;
+}
+.markdown-body table tbody tr:nth-child(even) {
+  background: rgba(28, 42, 34, 0.025);
 }

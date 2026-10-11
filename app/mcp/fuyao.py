@@ -46,7 +46,7 @@ _TOOL_NAMES = {
         "quote", "get_quote", "realtime_quote",
     ),
     "kline": (
-        "get_a_share_prices_historical", "kline", "get_kline", "daily_kline",
+        "get_a_share_prices_historical", "get_a_share_index_prices_historical", "kline", "get_kline", "daily_kline",
     ),
     "financials": (
         "get_a_share_financials_indicators", "financials", "get_financials", "finance_indicator",

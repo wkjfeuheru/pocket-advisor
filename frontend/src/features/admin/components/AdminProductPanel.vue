@@ -280,14 +280,38 @@ onMounted(load)
 </template>
 
 <style scoped>
-.admin-products { border: 1px solid var(--color-border); border-radius: 0; box-shadow: none; }
+/* .eyebrow 用全局定义，这里不再重复声明，避免样式分叉。 */
+.admin-products { border: 1px solid var(--color-border); box-shadow: var(--shadow-sm); }
 .panel-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
-.eyebrow { margin: 0 0 5px; color: var(--color-text-muted); font: 10px/1 var(--font-mono); letter-spacing: .08em; }
-h2 { margin: 0; color: var(--color-text); font-size: 15px; }
-.count-badge { display: grid; place-items: center; min-width: 24px; height: 24px; background: var(--color-primary-soft); color: var(--color-primary); font: 12px/1 var(--font-mono); }
+h2 {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: var(--text-xl);
+  font-weight: 600;
+  color: var(--color-primary);
+}
+.count-badge {
+  display: grid;
+  place-items: center;
+  min-width: 30px;
+  height: 30px;
+  padding: 0 9px;
+  border-radius: 999px;
+  background: var(--color-primary-soft);
+  color: var(--color-primary);
+  font: 12px/1 var(--font-mono);
+}
 .panel-note { margin: 10px 0 14px; color: var(--color-text-secondary); font-size: 12px; line-height: 1.6; }
 .panel-toolbar { display: flex; gap: 8px; margin-bottom: 12px; }
-.product-row { display: flex; align-items: center; gap: 12px; border-top: 1px solid var(--color-border); padding: 11px 0; }
+.product-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  border-top: 1px solid var(--color-hairline);
+  padding: 12px 8px;
+  transition: background 0.16s ease;
+}
+.product-row:hover { background: var(--color-primary-soft); }
 .product-main { min-width: 0; flex: 1; }
 .product-title { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; color: var(--color-text); }
 .product-code { color: var(--color-text-secondary); font: 12px/1 var(--font-mono); }

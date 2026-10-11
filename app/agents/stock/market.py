@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 from typing import Any
 
 QUOTE_STALE_SECONDS = 300
@@ -17,7 +18,7 @@ def _parse_time(value: str | None) -> datetime | None:
     except ValueError:
         return None
     if stamp.tzinfo is None:
-        stamp = stamp.replace(tzinfo=timezone.utc)
+        stamp = stamp.replace(tzinfo=ZoneInfo("Asia/Shanghai"))
     return stamp
 
 
@@ -58,7 +59,7 @@ def build_market_overview(
     session: str = "open",
     upstream_error: str = "",
 ) -> dict[str, Any]:
-    if upstream_error or indices is None or breadth is None or sectors is None:
+    if not indices:
         warning = upstream_error or "fuyao_unavailable"
         return {
             "failed": True,
@@ -71,6 +72,12 @@ def build_market_overview(
         }
     kept = []
     warnings: list[str] = []
+    if breadth is None:
+        warnings.append("市场涨跌家数暂不可用，以下分析仅覆盖已核验的指数行情。")
+    if sectors is None:
+        warnings.append("板块行情暂不可用，暂不判断板块轮动。")
+    breadth = breadth or {}
+    sectors = sectors or {}
     for item in indices:
         if _fresh(item, now=now, session=session):
             kept.append({
@@ -78,6 +85,8 @@ def build_market_overview(
                 "name": item.get("name"),
                 "last": item.get("last"),
                 "change_pct": item.get("change_pct"),
+                "turnover": item.get("turnover"),
+                "units": {"last": "点", "change_pct": "%", "turnover": "元"},
                 "source": item.get("source") or "fuyao",
                 "as_of": item.get("as_of"),
             })
@@ -87,7 +96,7 @@ def build_market_overview(
     concept = _leaders(list((sectors or {}).get("concept") or []))
     as_of = str(breadth.get("as_of") or (kept[0]["as_of"] if kept else now.isoformat()))
     return {
-        "failed": False,
+        "failed": not bool(kept),
         "indices": kept,
         "breadth": {
             "up": breadth.get("up"),

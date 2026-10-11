@@ -29,7 +29,7 @@ def test_render_output_has_no_trade_instructions_and_keeps_disclaimer():
         }],
     }
     rendered = render_stock_result(guarded, StockRequest(scenario="equity_research", symbols=["600519.SH"]))
-    content = rendered["content"]
+    content = rendered.summary
     for banned in ("买入", "卖出", "加仓", "减仓", "目标价", "仓位比例", "仓位 30%", "买卖点"):
         assert banned not in content, f"受控摘要仍包含 {banned}"
     assert SIMULATED_DISCLAIMER in content
@@ -114,6 +114,17 @@ class _DualScriptedModel:
 
         class _Structured:
             async def ainvoke(self, messages, config=None):  # noqa: ANN001
+                from app.agents.graphs.state import AnswerPlan, PlanPoint, PlanSection, SupervisorDecision
+                from app.agents.slots import SlotExtraction, SlotPatch
+
+                if schema is AnswerPlan:
+                    parent.compliance_inputs.append(messages)
+                    return AnswerPlan(sections=[PlanSection(points=[PlanPoint(point=parent.answer)])])
+                if schema is SupervisorDecision:
+                    return SupervisorDecision(finish=True)
+                if schema is SlotExtraction:
+                    return SlotExtraction(domain="stock_agent", patch=SlotPatch(
+                        set_values={"scenario": parent.classification.scenario}))
                 if schema is ScenarioClassification:
                     return parent.classification
                 return parent.intent
@@ -141,8 +152,9 @@ def test_real_stock_react_agent_inside_the_real_advisor_graph():
     )
     context = EvidenceContext(
         request_id="17171717-1717-1717-1717-171717171717",
-        session_id="advisor-stock-integration",
+        session_id="22222222-2222-2222-2222-222222222222",
         customer_id="CUST000001",
+        task_id="task-1",
     )
     evidence_store = MemoryAgentEvidenceStore()
     evidence = evidence_store.put(
@@ -181,7 +193,8 @@ def test_real_stock_react_agent_inside_the_real_advisor_graph():
         context_limit=20,
     )
     config = {"configurable": {
-        "thread_id": context.session_id,
+        "thread_id": "advisor-stock-integration:isolated",
+        "session_id": context.session_id,
         "customer_id": context.customer_id,
         "request_id": context.request_id,
     }}
@@ -197,9 +210,10 @@ def test_real_stock_react_agent_inside_the_real_advisor_graph():
     state = asyncio.run(run())
     values = state.values
 
-    artifacts = [item for result in values["agent_results"] for item in result.get("artifacts") or []]
-    assert artifacts, "Stock Agent 没有产出 artifact"
-    artifact = artifacts[0]
+    from app.agents.artifacts import artifact_for_result
+
+    artifact = artifact_for_result(values["stock_result"])
+    assert artifact, "Stock Agent 没有产出 artifact"
     assert artifact["scenario"] == "market_overview"
     assert artifact["schema_version"] == "stock-public-v1"
     assert artifact["market_overview"]["indices"]
@@ -215,7 +229,8 @@ def test_real_stock_react_agent_inside_the_real_advisor_graph():
     assert "update_time" not in human
     assert "pct_chg" not in human
 
-    answer = values["final_result"]
+    answer = values["final"].answer
+    assert "上证综指偏强" not in answer, "违规草稿应整体拒绝，不应删除禁词后继续使用"
     for token in ("买入", "卖出", "加仓", "减仓", "目标价", "买卖点", "仓位比例"):
         assert token not in answer, f"最终回答仍包含 {token}"
     assert SIMULATED_DISCLAIMER in answer

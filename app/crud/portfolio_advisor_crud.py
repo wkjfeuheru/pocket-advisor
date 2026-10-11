@@ -12,11 +12,16 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
+from contextvars import ContextVar
+from copy import deepcopy
+import hashlib
+import json
 from datetime import date, datetime
 from typing import Any, Mapping, Sequence
-from uuid import uuid4
+from uuid import UUID, uuid4
 
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import delete, func, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 
@@ -27,6 +32,7 @@ from app.db.models.portfolio_advisor import (
     AiPosition,
     AiTrade,
     AllocationPlan,
+    AllocationGeneration,
     AllocationPlanItem,
     ProductNavHistory,
 )
@@ -358,17 +364,71 @@ class PostgresPlanStore:
     成交不能引用一个不存在的方案。
     """
 
+    def __init__(self) -> None:
+        self._generation_session: ContextVar[Any] = ContextVar("allocation_generation_session", default=None)
+
+    @contextmanager
+    def generation_context(self, customer_id: str, *, request_id: str | None = None,
+                           session_id: str | None = None, task_id: str = ""):
+        """整个生成批次和完成快照共用一个事务；同一可信键跨进程串行。"""
+        ensure_schema()
+        if self._generation_session.get() is not None:
+            raise RuntimeError("allocation_generation_context_already_bound")
+        with session_scope() as session:
+            if request_id and session_id and task_id:
+                packed = json.dumps([customer_id.upper(), str(UUID(request_id)), str(UUID(session_id)), task_id], ensure_ascii=False)
+                lock_key = int.from_bytes(hashlib.sha256(packed.encode()).digest()[:8], "big", signed=True)
+                session.execute(text("SELECT pg_advisory_xact_lock(:lock_key)"), {"lock_key": lock_key})
+            token = self._generation_session.set(session)
+            try:
+                yield
+            finally:
+                self._generation_session.reset(token)
+
+    @contextmanager
+    def _session(self):
+        bound = self._generation_session.get()
+        if bound is not None:
+            yield bound
+        else:
+            with session_scope() as session:
+                yield session
+
+    def get_generation(self, customer_id: str, *, request_id: str, session_id: str, task_id: str) -> dict | None:
+        ensure_schema()
+        with self._session() as session:
+            row = session.get(AllocationGeneration, (customer_id.upper(), request_id, session_id, task_id))
+            return deepcopy(row.response) if row is not None else None
+
+    def save_generation(self, customer_id: str, response: Mapping[str, Any], *, request_id: str,
+                        session_id: str, task_id: str) -> dict:
+        session = self._generation_session.get()
+        if session is None:
+            raise RuntimeError("allocation_generation_context_not_bound")
+
+        def encode_date(value):
+            if isinstance(value, (date, datetime)):
+                return value.isoformat()
+            raise TypeError("unsupported_allocation_snapshot_value")
+
+        snapshot = json.loads(json.dumps(dict(response), ensure_ascii=False, default=encode_date))
+        session.add(AllocationGeneration(customer_id=customer_id.upper(), request_id=request_id,
+                                        session_id=session_id, task_id=task_id, response=snapshot))
+        session.flush()
+        return deepcopy(snapshot)
+
     def insert_plan(self, plan: Mapping[str, Any], items: Sequence[Mapping[str, Any]]) -> str:
         ensure_schema()
         payload = dict(plan)
         plan_id = str(payload.get("plan_id") or uuid4())
-        with session_scope() as session:
+        with self._session() as session:
             session.add(
                 AllocationPlan(
                     plan_id=plan_id,
                     customer_id=str(payload["customer_id"]).upper(),
                     request_id=payload.get("request_id") or None,
                     session_id=payload.get("session_id") or None,
+                    task_id=str(payload.get("task_id") or ""),
                     tier=str(payload["tier"]),
                     status=str(payload.get("status") or "offered"),
                     turnover_rate=payload.get("turnover_rate"),
@@ -401,11 +461,12 @@ class PostgresPlanStore:
                         reason=str(item.get("reason") or ""),
                     )
                 )
+            session.flush()
         return plan_id
 
     def get_plan(self, plan_id: str) -> dict | None:
         ensure_schema()
-        with session_scope() as session:
+        with self._session() as session:
             row = session.get(AllocationPlan, plan_id)
             if row is None:
                 return None
@@ -417,6 +478,9 @@ class PostgresPlanStore:
             return {
                 "plan_id": row.plan_id,
                 "customer_id": row.customer_id,
+                "request_id": row.request_id,
+                "session_id": row.session_id,
+                "task_id": row.task_id,
                 "tier": row.tier,
                 "status": row.status,
                 "turnover_rate": row.turnover_rate,
@@ -425,6 +489,7 @@ class PostgresPlanStore:
                 "limitations": list(row.limitations or []),
                 "unavailable_reason": row.unavailable_reason,
                 "adopted_at": row.adopted_at,
+                "nav_as_of": row.nav_as_of,
                 "items": [
                     {
                         "product_code": item.product_code,
@@ -433,14 +498,28 @@ class PostgresPlanStore:
                         "target_weight": item.target_weight,
                         "delta_weight": item.delta_weight,
                         "reason": item.reason,
+                        "current_amount": item.current_amount,
+                        "target_amount": item.target_amount,
                     }
                     for item in items
                 ],
             }
 
+    def find_generation(self, customer_id: str, *, request_id: str, session_id: str, task_id: str) -> list[dict]:
+        """列出任务方案；完整生成与重放只能以 get_generation 快照为准。"""
+        ensure_schema()
+        with self._session() as session:
+            ids = list(session.scalars(select(AllocationPlan.plan_id)
+                .where(AllocationPlan.customer_id == customer_id.upper())
+                .where(AllocationPlan.request_id == request_id)
+                .where(AllocationPlan.session_id == session_id)
+                .where(AllocationPlan.task_id == task_id)
+                .order_by(AllocationPlan.created_at.asc(), AllocationPlan.plan_id.asc())))
+        return [plan for plan_id in ids if (plan := self.get_plan(plan_id)) is not None]
+
     def list_plans(self, customer_id: str, *, limit: int = 50) -> list[dict]:
         ensure_schema()
-        with session_scope() as session:
+        with self._session() as session:
             rows = session.scalars(
                 select(AllocationPlan)
                 .where(AllocationPlan.customer_id == customer_id.upper())

@@ -203,8 +203,15 @@ def test_registering_the_job_uses_a_daily_cron_trigger_at_18_shanghai(service):
     assert scheduler.job is not None
 
 
-def test_the_registered_job_is_runnable_and_writes_navs(service):
+def test_the_registered_job_is_runnable_and_writes_navs(service, monkeypatch):
     import asyncio
+    from datetime import datetime
+    from app.services.portfolio_advisor import nav_job
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return cls(2026, 9, 28, 18, 0, tzinfo=tz)
+    monkeypatch.setattr(nav_job, "datetime", Clock)
 
     scheduler = _FakeScheduler()
     register_nav_job(

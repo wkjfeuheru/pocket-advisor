@@ -1,0 +1,134 @@
+"""真实大盘查询暴露的适配、聚合与预算问题。"""
+from datetime import datetime, timezone
+import pytest
+
+from app.mcp.fuyao_dto import normalize_payload
+from app.agents.stock.market import build_market_overview
+
+
+def test_real_calendar_dates_survive_normalization():
+    rows = normalize_payload("trade_calendar", {"code": 0, "data": {"timestamp": 1791690429135,
+        "item": [{"date_ms": 1791475200000, "date": "20261009"}]}})
+    assert rows[0]["trade_date"] == "2026-10-09"
+
+
+def test_real_index_historical_is_readonly_whitelisted():
+    from app.mcp.fuyao import operation_for_tool_name
+    assert operation_for_tool_name("fuyao_a_share_index_get_a_share_index_prices_historical") == "kline"
+
+
+def test_business_error_is_not_a_security_code():
+    result = normalize_payload("quote", {"code": 1002, "message": "invalid symbol", "data": None})
+    assert result.get("thscode") is None
+    assert result["failed"] is True
+
+
+def test_quote_keeps_turnover_and_timestamp_precision():
+    rows = normalize_payload("quote", {"code": 0, "data": {"timestamp": 1791690506000,
+        "item": [{"thscode": "000001.SH", "last_price": 3813.79, "turnover": 888561200000}]}})
+    assert rows[0]["turnover"] == 888561200000
+    assert "T" in rows[0]["as_of"]
+
+
+def test_partial_market_keeps_verified_indices():
+    result = build_market_overview(indices=[{"thscode": "000001.SH", "last": 3813.79,
+        "change_pct": 0.05, "as_of": "2026-10-09", "source": "fuyao"}], breadth=None,
+        sectors=None, now=datetime(2026, 10, 11, tzinfo=timezone.utc), session="closed",
+        upstream_error="market_evidence_incomplete")
+    assert result["failed"] is False
+    assert result["indices"][0]["last"] == 3813.79
+    assert result["breadth"]["up"] is None
+    assert len(result["warnings"]) <= 2
+
+
+def test_market_snapshot_does_not_turn_equity_quotes_into_indices():
+    from app.agents.stock.evidence_store import EvidenceContext, MemoryAgentEvidenceStore
+    from app.agents.stock.tools import bind_stock_execution, reset_stock_execution, build_stock_local_tools
+    store = MemoryAgentEvidenceStore()
+    ctx = EvidenceContext("request", "session", "customer")
+    row = store.put(ctx, tool_call_id="q", tool_name="fuyao_a_share_get_a_share_prices_snapshot",
+        evidence_type="quote", payload={"data": [{"thscode": "600519.SH", "last": 1263, "as_of": "2026-10-09"}]},
+        source="fuyao", as_of="2026-10-09")
+    token = bind_stock_execution(ctx)
+    try:
+        tool = next(t for t in build_stock_local_tools(store=store) if t.name == "aggregate_market_snapshot")
+        result = tool.invoke({"evidence_ids": [row["id"]]})
+    finally:
+        reset_stock_execution(token)
+    assert store.get(result["evidence_id"], ctx)["payload"]["indices"] == []
+
+
+def test_millisecond_history_arguments_match_confirmed_timeframe():
+    from app.agents.evidence import bind_execution, reset_execution, validate_tool_arguments
+    token = bind_execution(None, None, domain_slots={"symbols": ["600519.SH"],
+        "timeframe": {"start": "2026-10-01", "end": "2026-10-11"}})
+    try:
+        assert not validate_tool_arguments("fuyao_a_share_get_a_share_prices_historical", {
+            "thscode": "600519.SH", "start": 1790784000000, "end": 1791648000000})
+    finally:
+        reset_execution(token)
+
+
+def test_recent_week_is_an_explicit_timeframe():
+    from app.agents.slots import normalize_timeframe
+    result = normalize_timeframe("最近一周", now=datetime(2026, 10, 11, tzinfo=timezone.utc))
+    assert result.start == "2026-10-04" and result.end == "2026-10-11"
+
+
+@pytest.mark.asyncio
+async def test_market_pipeline_retains_partial_data_and_uses_metadata_names():
+    from types import SimpleNamespace
+    from app.agents.stock.evidence_store import EvidenceContext, MemoryAgentEvidenceStore
+    from app.agents.stock.market_fetch import collect_market_evidence
+    calls = []
+    async def snapshot(args):
+        calls.append(args)
+        return {"code": 0, "data": {"timestamp": "2026-10-09T15:00:00+08:00", "item": [
+            {"thscode": "000001.SH", "last_price": 3813.79, "price_change_ratio_pct": 0.05}]}}
+    async def calendar(args):
+        return {"code": 0, "data": {"item": [{"date": "20261009"}]}}
+    async def search(args):
+        return {"code": 0, "data": {"item": [{"thscode": "000001.SH", "name": "上证指数"}]}}
+    tools = [SimpleNamespace(name="fuyao_a_share_index_get_a_share_index_prices_snapshot", ainvoke=snapshot),
+        SimpleNamespace(name="fuyao_a_share_get_a_share_calendar_trading_days", ainvoke=calendar),
+        SimpleNamespace(name="fuyao_meta_get_meta_tickers_search", ainvoke=search)]
+    store = MemoryAgentEvidenceStore()
+    ctx = EvidenceContext("request", "session", "customer")
+    response = await collect_market_evidence(store, ctx, tools, {})
+    payload = store.get(response.evidence_ids[0], ctx)["payload"]
+    assert not response.failed and payload["indices"][0]["name"] == "上证指数"
+    assert payload["last_calendar_trade_date"] == "2026-10-09"
+    assert len(calls) == 1
+
+
+def test_public_warnings_do_not_expose_internal_codes():
+    from app.services.agent_service import _collect_warnings
+    from app.agents.graphs.state import StockResult
+    warnings = _collect_warnings({"stock_result": StockResult(warnings=[
+        "missing_market_aggregate", "market_evidence_incomplete", "missing_structured_response"])})
+    assert warnings and all("missing_" not in w and "market_evidence" not in w for w in warnings)
+
+
+@pytest.mark.asyncio
+async def test_repeat_guard_allows_different_arguments_and_reuses_identical_queries():
+    from types import SimpleNamespace
+    from langchain_core.messages import ToolMessage
+    from app.agents.stock.agent import _tool_repeat_guard
+    from app.agents.stock.tools import bind_stock_execution, reset_stock_execution
+    middleware = _tool_repeat_guard()
+    called = []
+    async def handler(request):
+        called.append(request.tool_call["args"])
+        return ToolMessage(content="verified", tool_call_id=request.tool_call["id"])
+    token = bind_stock_execution(None)
+    try:
+        for n in range(4):
+            request = SimpleNamespace(tool_call={"name": "quote", "args": {"thscode": f"{n:06}.SH"}, "id": str(n)})
+            response = await middleware.awrap_tool_call(request, handler)
+            assert response.content == "verified"
+        repeat = SimpleNamespace(tool_call={"name": "quote", "args": {"thscode": "000000.SH"}, "id": "repeat"})
+        response = await middleware.awrap_tool_call(repeat, handler)
+        assert response.tool_call_id == "repeat"
+        assert len(called) == 4
+    finally:
+        reset_stock_execution(token)

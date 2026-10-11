@@ -20,6 +20,7 @@ SCHEMA_APPLY_ORDER = (
     "004_stock_features.sql",
     "005_agent_evidence.sql",
     "006_portfolio_advisor.sql",
+    "007_advisor_v2.sql",
 )
 
 SEED_SCHEMA_FILES = ("002_seed.sql",)

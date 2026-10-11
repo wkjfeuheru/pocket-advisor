@@ -65,6 +65,7 @@ class RunView(BaseModel):
     request_id: str
     session_id: str
     status: str
+    graph_version: str = "legacy"
     stage: str = ""
     final_answer: str = ""
     error_code: str = ""

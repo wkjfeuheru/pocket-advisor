@@ -41,7 +41,7 @@ def test_the_migration_is_registered_in_the_apply_order(ddl):
         f"{MIGRATION} 未加入 SCHEMA_APPLY_ORDER，部署时不会被执行"
     )
     # 顺序必须在 005 之后，否则外键指向的表可能还不存在。
-    assert SCHEMA_APPLY_ORDER.index(MIGRATION) == len(SCHEMA_APPLY_ORDER) - 1
+    assert SCHEMA_APPLY_ORDER.index(MIGRATION) > SCHEMA_APPLY_ORDER.index("005_agent_evidence.sql")
 
 
 @pytest.mark.parametrize("table", NEW_TABLES)

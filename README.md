@@ -2,7 +2,7 @@
 
 金融投顾**业务系统**：模拟交易（商品、持仓、账户）与只读智能投顾对话，配 Vue 3 界面与 FastAPI 接口。**模拟盘，不对接券商，不构成投资建议。**
 
-普通用户可以在 `/advisor` 与投顾助手对话。助手只读取商品、账户和持仓，不能充值、下单、赎回或清仓。管理员仍只使用管理后台，不能进入投顾。
+普通用户可以在 `/advisor` 与投顾助手对话。助手只读取商品、账户和持仓，不能充值、下单、赎回或清仓；AI 配置建议只写反事实账本（`ai_*` 表），用户真实持仓与流水仍不被写入。管理员仍只使用管理后台，不能进入投顾。
 
 ## 功能特性
 
@@ -14,17 +14,19 @@
 - **单一计算源**：账户与盈亏口径只有一份实现（`app/services/portfolio_service.py`），REST 与管理后台只读该口径。
 - **角色互斥**：普通用户走 `/api/portfolio/*`、交易界面和 `/advisor`；管理员走 `/api/admin/*` 与后台。登录共用，登录后立刻分流。管理员 token 调用用户交易或投顾接口返回 403。
 - **只读投顾**：LangGraph 工作流做意图识别，再并行股票子图 / 商品 / 持仓 / 问答。股票子图覆盖市场总览、1–3 只个股深研和研究候选池。行情或快照局部故障时按场景降级，不编造数字。
+- **持仓配置建议（反事实账本）**：对话中可选择对持仓做配置优化，生成 light / moderate / rebuild 三档方案（含换手率、费用、风险与集中度前后对比）；用户采纳后调仓结果写入**与用户持仓完全隔离的 AI 账本**，不触达 `finance.positions` / `orders` / `cash_transactions`。AI 线可与用户线做归一净值对比。
 
 ## 投顾工作流
 
 ```text
-START → classify_intent → profile_gate → dispatch_intents
+START → classify_intent → profile_gate → dispatch_tasks
       → stock / product / portfolio / chat（只派发命中的分支）
       → suitability_guard → compliance_node（生成 + 合规校验）→ END
 ```
 
 - 个性化建议缺少风险、期限、目标或流动性时，原轮次会挂起。用户在表单里确认后，用原来的 `request_id` 恢复，不必重发问题。涉及金额配置时还要预算。模型不能改写长期画像。
 - 股票标的歧义、一次深研超过 3 只、或选股缺少策略/周期时，走独立的澄清中断（`clarification_required`），与画像中断分开。
+- `portfolio_agent` 节点在服务运行时注入了配置分支（`allocation_runner`）。命中持仓优化意图时，该节点生成三档方案并 `interrupt` 等用户采纳；未注入或缺少可信 `customer_id` 时回退为普通持仓查询分支，避免整轮失败。
 - 高于用户风险等级的商品可以解释，但不会进入推荐集合。研究候选股票走 `candidate_stocks`，不会进入商品适配性门禁。
 - 会话 id 就是 LangGraph `thread_id`。图在每个节点边界以同步耐久模式写入 PgSaver。重复 `request_id` 不会再保存用户消息，也不会重跑已完成轮次。失败且 `retryable` 的轮次从最近 checkpoint 重试。
 - PgSaver 自己的 `checkpoint_*` 表是基础设施，不在业务 ORM 和业务查询里。删除会话时会调用 `adelete_thread` 清掉对应 checkpoint。
@@ -37,6 +39,7 @@ START → classify_intent → profile_gate → dispatch_intents
 - FastAPI / Uvicorn
 - SQLAlchemy 2.x（ORM） + psycopg3
 - PostgreSQL，以及 LangGraph `AsyncPostgresSaver`
+- APScheduler 3.x（净值同步调度，缺失或启动失败时降级）
 - LangGraph / LangChain / OpenAI-compatible Chat Model
 - Pydantic v2
 - Vue 3 / TypeScript / Vite / Element Plus / Axios
@@ -51,14 +54,14 @@ FinanceAgent/
 │   ├── db/                     # Base、session、schema 加载、ORM 模型
 │   ├── schemas/                # API 请求/响应
 │   ├── crud/                   # 数据访问
-│   ├── services/               # 业务逻辑（含盈亏口径）
-│   ├── routers/                # HTTP 路由（user / product / portfolio / admin / agent）
-│   ├── agents/                 # 投顾 LangGraph、只读工具与运行时
+│   ├── services/               # 业务逻辑（含盈亏口径、portfolio_advisor 净值/方案/AI 账本/调度）
+│   ├── routers/                # HTTP 路由（user / product / portfolio / allocation / admin / agent）
+│   ├── agents/                 # 投顾 LangGraph、只读工具、portfolio 配置分支与运行时
 │   ├── mcp/                    # Fuyao 白名单客户端、Tushare、MCP 连接
 │   └── utils/                  # 错误映射、限流、文本工具
 ├── scripts/       # 运维/诊断脚本（migrate / bootstrap_admin / 种子 / 漂移诊断）
 ├── migrations/    # PostgreSQL 编号迁移 SQL（结构唯一事实源）
-├── frontend/src/  # Vue 应用（product / portfolio / admin / auth features）
+├── frontend/src/  # Vue 应用（product / portfolio 含 PortfolioCompareView / chat 含 AllocationPlanCards / admin / auth）
 ├── tests/         # architecture / unit / integration / contract，以及 Agent 骨架测试
 ├── deploy/        # Nginx 部署资产
 ├── docker-compose.yml
@@ -119,6 +122,10 @@ python -m scripts.bootstrap_admin --dry-run          # 只查看角色分布
 | `finance.agent_sessions` / `agent_messages` / `agent_turns` | 投顾会话、公开消息与轮次 |
 | `finance.advisor_profiles` | 用户确认过的风险画像，每个用户一行 |
 | `finance.stock_feature_snapshots` / `finance.stock_features` | 选股用的每日特征快照（只读 ready） |
+| `finance.agent_tool_evidence` | Stock Agent 工具结果的 24 小时证据句柄（TTL 清理） |
+| `finance.product_nav_history` | 日频净值历史，**唯一价格事实源**；`data_source` 区分 real/synthetic，真数据优先覆盖合成 |
+| `finance.allocation_plans` / `allocation_plan_items` | 配置方案与明细（权重存 0–1 小数；方案不可逆，可多次采纳） |
+| `finance.ai_accounts` / `ai_positions` / `ai_trades` / `ai_portfolio_snapshots` | AI 反事实账本与对比快照，与用户表隔离；`ai_trades` append-only，两级幂等键 |
 
 `checkpoint_*` 由 PgSaver 在首次启动时创建，不是业务表。
 
@@ -127,6 +134,8 @@ python -m scripts.bootstrap_admin --dry-run          # 只查看角色分布
 - `001_schema.sql` — 用户、会话、商品、账户、流水、委托、持仓（含旧库补列）
 - `003_advisor.sql` — 投顾会话、消息、轮次与风险画像
 - `004_stock_features.sql` — 股票特征快照
+- `005_agent_evidence.sql` — 股票工具结果证据句柄（`agent_tool_evidence`，24 小时 TTL）
+- `006_portfolio_advisor.sql` — 日频净值历史、配置方案、AI 账本与对比快照
 - `002_seed.sql` — 产品、演示账号与一笔模拟持仓（仅 `--seed` 时应用）
 
 演示账号（`--seed` 之后可登录）：`demo` / `DemoUser#2026`，`admin` / `AdminDemo#2026`。重复灌种会把这两个账号的口令和 demo 的演示持仓重置为脚本中的数字。
@@ -153,6 +162,12 @@ python -m scripts.bootstrap_admin --dry-run          # 只查看角色分布
 | POST | `/api/portfolio/liquidate` | 一键清仓 |
 | GET | `/api/portfolio/orders` | 成交记录 |
 | GET | `/api/portfolio/transactions` | 资金流水 |
+| POST | `/api/portfolio/advice` | 按当前持仓生成三档配置方案（不落用户持仓） |
+| GET | `/api/portfolio/allocations` | 配置方案列表 |
+| GET | `/api/portfolio/allocations/{plan_id}` | 配置方案详情 |
+| POST | `/api/portfolio/allocations/{plan_id}/adopt` | 采纳方案，调仓写入 AI 账本 |
+| GET | `/api/portfolio/ai-account` | AI 账户快照与用户/AI 归一净值对比曲线 |
+| POST | `/api/portfolio/snapshots` | 固化当日双线快照（幂等，同日重跑覆盖） |
 | GET | `/api/admin/users` | 用户总览（管理员） |
 | GET | `/api/admin/users/{customer_id}/portfolio` | 单用户账户与持仓（管理员） |
 | GET | `/api/admin/products` | 完整货架含下架（管理员） |
@@ -202,11 +217,16 @@ python -m scripts.refresh_stock_features --as-of 2026-09-26
 | `ADVISOR_MODEL_NAME` | 模型名，默认 `deepseek-chat` |
 | `FUYAO_API_KEY` | 行情 MCP 密钥。缺失时总览失败，深研/选股降级 |
 | `TUSHARE_TOKEN` | Tushare Pro 密钥。缺失时消息面不可用，不进入评分 |
+| `PORTFOLIO_NAV_SOURCE` | 日频净值源实现，格式 `module.path:ClassName`，须实现 `NavSource`。留空时每日作业记 `no_source` |
 | `AGENT_TURN_TIMEOUT_SECONDS` | 单轮超时，默认 `120`。超时的运行中轮次会标为可重试 |
 | `AGENT_MAX_MESSAGE_CHARS` | 单条消息上限，默认 `4000` |
 | `AGENT_CONTEXT_MESSAGE_LIMIT` | 带入模型的历史消息条数，默认 `20` |
 
 密钥只放在 `.env` 或进程环境里，不写进镜像。
+
+## 净值与快照
+
+启动时 `nav_scheduler()` 注册进程内每日作业 `portfolio_nav_sync`，**每个交易日 18:00（Asia/Shanghai）**按 `PORTFOLIO_NAV_SOURCE` 同步日频净值；非交易日跳过。APScheduler 未安装或启动失败只降级，不影响业务 API。未配置净值源时作业如实记 `no_source`，不假装成功。每日双线快照由 `POST /api/portfolio/snapshots` 固化（幂等，同日重跑覆盖）。
 
 ## 故障恢复
 
@@ -225,6 +245,8 @@ python -m scripts.verify_portfolio_live                         # 真实 Postgre
 python -m scripts.generate_product_seed \
   --input scripts/data/products.sample.json \
   --output migrations/002_product_seed.sql                 # 只生成产品 SQL，不进入自动迁移
+python -m scripts.import_nav nav.csv [--lenient]           # 导入真实日频净值（有问题行默认退出码 2）
+python -m scripts.seed_nav --days 180 [--seed 7|--clear]   # 播种/清除合成日频净值
 ```
 
 ## 测试

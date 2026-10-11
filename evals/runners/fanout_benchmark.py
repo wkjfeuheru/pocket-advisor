@@ -42,6 +42,9 @@ def _model_for(agents: list[str]) -> ScriptedModel:
             Intent(agent=name, task=f"任务{name}", kind="general") for name in agents
         ]),
         ["汇总完成。\n推荐代码: 无"],
+        slot_values={"stock_agent": {"scenario": "market_overview"},
+                     "product_agent": {"operation": "query", "product_type": "fund"},
+                     "portfolio_agent": {"operation": "query"}},
     )
 
 

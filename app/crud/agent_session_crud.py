@@ -138,7 +138,7 @@ class PostgresAdvisorStore:
             raise
         return _message_dict(row)
 
-    def insert_turn(self, session_id: str, request_id: str, status: str = "pending") -> dict[str, Any]:
+    def insert_turn(self, session_id: str, request_id: str, status: str = "pending", *, graph_version: str = "advisor-v2") -> dict[str, Any]:
         if status not in TURN_STATUSES:
             raise ValueError("非法轮次状态")
         now = _utcnow()
@@ -146,6 +146,7 @@ class PostgresAdvisorStore:
             request_id=_uuid(request_id),
             session_id=_uuid(session_id),
             status=status,
+            graph_version=graph_version,
             stage="",
             interrupt_payload=None,
             final_answer="",
@@ -213,6 +214,16 @@ class PostgresAdvisorStore:
             .order_by(AgentSession.updated_at.desc())
         ).all()
         return [_session_dict(row) for row in rows]
+
+    def list_turns(self, session_id: str) -> list[dict[str, Any]]:
+        rows = self._db().scalars(select(AgentTurn).where(AgentTurn.session_id == _uuid(session_id))).all()
+        return [_turn_dict(row) for row in rows]
+
+    def update_session_context(self, session_id: str, context: dict[str, Any]) -> None:
+        row = self._db().get(AgentSession, _uuid(session_id))
+        if row is None:
+            raise KeyError(session_id)
+        row.context = context
 
     def list_messages(self, customer_id: str, session_id: str) -> list[dict[str, Any]]:
         parent = self.get_session(customer_id, session_id)
@@ -297,6 +308,7 @@ def _session_dict(row: AgentSession) -> dict[str, Any]:
         "id": str(row.id),
         "customer_id": row.customer_id,
         "title": row.title,
+        "context": row.context or {},
         "created_at": _iso(row.created_at),
         "updated_at": _iso(row.updated_at),
     }
@@ -319,6 +331,7 @@ def _turn_dict(row: AgentTurn) -> dict[str, Any]:
         "request_id": str(row.request_id),
         "session_id": str(row.session_id),
         "status": row.status,
+        "graph_version": row.graph_version,
         "stage": row.stage,
         "interrupt_payload": row.interrupt_payload,
         "final_answer": row.final_answer,

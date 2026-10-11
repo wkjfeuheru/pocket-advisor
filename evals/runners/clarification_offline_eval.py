@@ -49,46 +49,36 @@ def _check_clarify_contract() -> tuple[bool, str]:
     from app.agents.stock import tools as stock_tools
     from app.agents.stock.evidence_store import MemoryAgentEvidenceStore
 
+    from app.agents.evidence import NeedsClarification
     captured: dict[str, Any] = {}
-
-    def fake_interrupt(payload: dict[str, Any]) -> dict[str, Any]:
-        captured.update(payload)
-        return {"strategy": "value_quality"}
-
-    original = stock_tools.interrupt
-    stock_tools.interrupt = fake_interrupt
+    tool_map = {item.name: item for item in stock_tools.build_stock_local_tools(store=MemoryAgentEvidenceStore())}
     try:
-        tool_map = {
-            item.name: item
-            for item in stock_tools.build_stock_local_tools(store=MemoryAgentEvidenceStore())
-        }
-        answer = tool_map["request_stock_clarification"].invoke({
+        tool_map["request_stock_clarification"].invoke({
             "reason": "missing_strategy",
             "question": "请选择策略",
             "fields": ["strategy"],
             "options": [{"field": "strategy", "id": "value_quality", "label": "价值质量"}],
         })
-        if captured.get("kind") != "clarification":
-            return False, f"kind={captured.get('kind')}"
-        if not captured.get("agent_version"):
-            return False, "缺少 agent_version 版本戳"
-        if captured.get("fields") != ["strategy"]:
-            return False, f"fields={captured.get('fields')}"
-        if answer != {"strategy": "value_quality"}:
-            return False, f"resume 回传丢失: {answer}"
-
-        # 非白名单字段必须拒绝
-        try:
-            tool_map["request_stock_clarification"].invoke({
-                "reason": "bad", "question": "x", "fields": ["credit_card_number"],
-            })
-        except ValueError:
-            pass
-        else:
-            return False, "非法澄清字段未被拒绝"
-        return True, ""
-    finally:
-        stock_tools.interrupt = original
+    except NeedsClarification as exc:
+        captured = exc.payload
+    else:
+        return False, "专家未报告主控澄清需求"
+    if captured.get("kind") != "clarification":
+        return False, f"kind={captured.get('kind')}"
+    if not captured.get("agent_version"):
+        return False, "缺少 agent_version 版本戳"
+    if captured.get("fields") != ["strategy"]:
+        return False, f"fields={captured.get('fields')}"
+    # 非白名单字段必须拒绝
+    try:
+        tool_map["request_stock_clarification"].invoke({
+            "reason": "bad", "question": "x", "fields": ["credit_card_number"],
+        })
+    except ValueError:
+        pass
+    else:
+        return False, "非法澄清字段未被拒绝"
+    return True, ""
 
 
 def main(argv: list[str] | None = None) -> dict[str, Any]:
