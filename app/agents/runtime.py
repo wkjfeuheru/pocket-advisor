@@ -127,6 +127,10 @@ def build_slot_resolvers(library: Any, mcp_tools: list[Any]) -> dict[str, Any]:
                        for item in matches if item.get("code")]
             options = list({item["id"]: item for item in options}.values())
             if len(options) != 1:
+                if not options and re.fullmatch(r"\d{6}", raw):
+                    unavailable = missing(output, [], warning="product_not_found")
+                    unavailable["question"] = f"商品库中未找到代码{raw}对应的商品。请核对代码，或选择商品库中的其他商品。"
+                    return unavailable
                 return missing(output, options, warning="product_not_unique")
             resolved.append(options[0]["id"])
         output.update(codes=list(dict.fromkeys(resolved)), symbols=[])

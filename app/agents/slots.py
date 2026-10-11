@@ -406,6 +406,9 @@ async def extract_slots(model, agent: str, query: str, history: list, existing: 
 
     values = extraction.patch.set_values
     if agent == "stock_agent":
+        for field in ("symbols", "index_scope"):
+            if field in values:
+                values[field] = [item for item in values[field] if item not in {"A股", "A股市场", "全市场", "全部A股", "股票"}]
         explicit_codes = re.findall(r"(?<!\d)\d{6}\.(?:SH|SZ|BJ)(?![A-Za-z])", query, re.IGNORECASE)
         if not explicit_codes:
             for match in re.finditer(r"(?<!\d)\d{6}\.(?:SH|SZ|BJ)(?![A-Za-z])", source_query, re.IGNORECASE):

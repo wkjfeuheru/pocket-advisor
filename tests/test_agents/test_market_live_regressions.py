@@ -132,6 +132,18 @@ async def test_explicit_index_code_survives_model_name_and_scenario_drift():
 
 
 @pytest.mark.asyncio
+async def test_broad_a_share_universe_is_not_an_index_security():
+    from app.agents.slots import extract_slots, SlotExtraction, SlotPatch
+    class Model:
+        def with_structured_output(self, *a, **kw): return self
+        async def ainvoke(self, inputs):
+            return SlotExtraction(patch=SlotPatch(set_values={"scenario": "stock_screening", "strategy": "value_quality",
+                "horizon": "long", "index_scope": ["A股"]}))
+    result = await extract_slots(Model(), "stock_agent", "在A股中按长期价值质量策略选股", [], {})
+    assert not result["missing"] and not result["slots"].get("index_scope")
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("history_code,expected", [("000300.SH", True), ("399006.SZ", False)])
 async def test_historical_only_result_is_independent_and_never_relabels_another_index(history_code, expected):
     from types import SimpleNamespace
