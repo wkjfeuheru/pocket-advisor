@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import random
+import time
 from collections.abc import Awaitable, Callable
 from datetime import datetime
 from typing import Any
@@ -28,11 +30,24 @@ logger = logging.getLogger(__name__)
 
 SOURCE = "eastmoney"
 _TIMEOUT_SECONDS = 10.0
-# 东财公开接口会随机丢弃连接（实测同一批请求时成时败），对瞬时传输错误做一次重试。
-_RETRIES = 2
+# 东财实时行情接口会随机丢弃连接（实测同一批请求时成时败），因此重试并按域名轮换。
+_RETRIES = 3
+_BACKOFF_BASE = 0.3
+# 成功结果短期缓存，避免同一会话多轮重复打上游、降低被限流概率。
+_CACHE_TTL_SECONDS = 120.0
 _UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
        "(KHTML, like Gecko) Chrome/124.0 Safari/537.36")
-_QUOTE_BASE = "https://push2.eastmoney.com/api/qt"
+# 补齐浏览器常规请求头（Referer 指向东财行情站），降低被反爬拦截的概率。
+_HEADERS = {
+    "User-Agent": _UA,
+    "Referer": "https://quote.eastmoney.com/",
+    "Accept": "application/json, text/plain, */*",
+    "Accept-Language": "zh-CN,zh;q=0.9",
+}
+_API_PREFIX = "/api/qt"
+# 实时行情有多个镜像域名，逐个回退；实测它们可能同时抖动，因此仅作提高成功率的补充。
+_QUOTE_HOSTS = ("https://push2.eastmoney.com", "https://push2delay.eastmoney.com",
+                "https://82.push2.eastmoney.com")
 _SHANGHAI = ZoneInfo("Asia/Shanghai")
 
 # 指数 secid 覆盖整市场：上证综指=沪市、深证成指=深市、北证50=北交所。
@@ -93,16 +108,18 @@ def _latest_epoch(rows: list[dict], field: str = "f124") -> str:
     return max(stamps, default="")
 
 
-async def _fetch_data(client: httpx.AsyncClient, url: str) -> Any:
-    """请求东财并把响应收敛成 ``data`` 字段；非 0 业务码或结构异常一律报错交给上层降级。
+async def _fetch_data(client: httpx.AsyncClient, path: str) -> Any:
+    """按域名轮换请求东财并收敛成 ``data`` 字段。
 
-    连接被上游随机丢弃（``httpx.TransportError``）时按 ``_RETRIES`` 重试；
-    业务错误码不重试，避免把确定性失败拖成长尾。
+    每次尝试换一个镜像域名（``_QUOTE_HOSTS``）；连接被上游丢弃（``httpx.TransportError``）
+    时按指数退避后继续，耗尽 ``_RETRIES`` 次才上报失败。业务错误码不重试，
+    避免把确定性失败拖成长尾。``path`` 不含域名，便于替换主机。
     """
     failure: Exception | None = None
     for attempt in range(_RETRIES):
+        host = _QUOTE_HOSTS[attempt % len(_QUOTE_HOSTS)]
         try:
-            response = await client.get(url)
+            response = await client.get(host + path)
             response.raise_for_status()
             body = response.json()
             if not isinstance(body, dict) or body.get("rc") not in (0, None):
@@ -110,8 +127,10 @@ async def _fetch_data(client: httpx.AsyncClient, url: str) -> Any:
             return body.get("data")
         except httpx.TransportError as exc:
             failure = exc
+            logger.warning("eastmoney_transport_error host=%s attempt=%s reason=%s",
+                           host, attempt, sanitize_error(exc))
             if attempt + 1 < _RETRIES:
-                await asyncio.sleep(0.2 * (attempt + 1))
+                await asyncio.sleep(_BACKOFF_BASE * (2 ** attempt) + random.uniform(0, 0.1))
     raise failure or RuntimeError("eastmoney_unavailable")
 
 
@@ -131,9 +150,9 @@ def _rows(data: Any) -> list[dict]:
 async def _market_breadth(client: httpx.AsyncClient, params: dict[str, Any]) -> dict[str, Any]:
     secids = params.get("secids") or BREADTH_SECIDS
     joined = ",".join(str(item) for item in secids)
-    url = (f"{_QUOTE_BASE}/ulist.np/get?fltt=2&invt=2&fields=f12,f14,f104,f105,f106,f124"
-           f"&secids={joined}")
-    rows = _rows(await _fetch_data(client, url))
+    path = (f"{_API_PREFIX}/ulist.np/get?fltt=2&invt=2&fields=f12,f14,f104,f105,f106,f124"
+            f"&secids={joined}")
+    rows = _rows(await _fetch_data(client, path))
     up = [item for item in (_count(row.get("f104")) for row in rows) if item is not None]
     down = [item for item in (_count(row.get("f105")) for row in rows) if item is not None]
     flat = [item for item in (_count(row.get("f106")) for row in rows) if item is not None]
@@ -158,9 +177,9 @@ async def _sector_overview(client: httpx.AsyncClient, params: dict[str, Any]) ->
         # 各自只取 top 条，既准确又省流量。
         rows: list[dict] = []
         for order in ("1", "0"):
-            url = (f"{_QUOTE_BASE}/clist/get?pn=1&pz={top}&po={order}&np=1&fltt=2&invt=2"
-                   f"&fid=f3&fs={fs}&fields=f12,f14,f3,f124")
-            rows.extend(_rows(await _fetch_data(client, url)))
+            path = (f"{_API_PREFIX}/clist/get?pn=1&pz={top}&po={order}&np=1&fltt=2&invt=2"
+                    f"&fid=f3&fs={fs}&fields=f12,f14,f3,f124")
+            rows.extend(_rows(await _fetch_data(client, path)))
         result[board] = _leaders(rows, top)
         stamps.extend(text for text in (_iso_from_epoch(row.get("f124")) for row in rows) if text)
     return {**result, "source": SOURCE, "as_of": max(stamps, default="") or _now_iso()}
@@ -183,30 +202,55 @@ def _leaders(rows: list[dict], top: int) -> list[dict]:
 
 
 class EastmoneyClient:
-    """按内部操作名调用东财公开接口。返回信封，永不抛出请求细节。"""
+    """按内部操作名调用东财公开接口。返回信封，永不抛出请求细节。
+
+    复用单个 ``httpx.AsyncClient`` 以保持连接池，并对成功结果做短期缓存；
+    缓存只存成功信封，失败不缓存，避免把一次抖动放大成持续降级。
+    """
 
     def __init__(self, *, transport: httpx.AsyncBaseTransport | None = None,
-                 timeout: float = _TIMEOUT_SECONDS) -> None:
+                 timeout: float = _TIMEOUT_SECONDS,
+                 cache_ttl: float = _CACHE_TTL_SECONDS) -> None:
         self._transport = transport
         self._timeout = timeout
+        self._cache_ttl = cache_ttl
+        self._client: httpx.AsyncClient | None = None
+        self._cache: dict[tuple, tuple[float, Envelope]] = {}
 
     @property
     def operations(self) -> list[str]:
         return sorted(_OPERATIONS)
 
+    def _http(self) -> httpx.AsyncClient:
+        """懒加载并复用底层客户端；``transport`` 供测试注入假传输。"""
+        if self._client is None:
+            self._client = httpx.AsyncClient(transport=self._transport, timeout=self._timeout,
+                                             headers=_HEADERS, follow_redirects=True)
+        return self._client
+
+    async def aclose(self) -> None:
+        if self._client is not None:
+            await self._client.aclose()
+            self._client = None
+
     async def call(self, name: str, **params: Any) -> Envelope:
         entry = _OPERATIONS.get(str(name))
         if entry is None:
             return wrap_envelope(RuntimeError(f"{name} unavailable"), code="unavailable")
+        key = (str(name), tuple(sorted((str(k), str(v)) for k, v in params.items())))
+        cached = self._cache.get(key)
+        now = time.monotonic()
+        if cached is not None and cached[0] > now:
+            return cached[1]
         _, run = entry
         try:
-            async with httpx.AsyncClient(transport=self._transport, timeout=self._timeout,
-                                         headers={"User-Agent": _UA}, follow_redirects=True) as client:
-                data = await run(client, params)
-            return wrap_envelope(data)
+            envelope = wrap_envelope(await run(self._http(), params))
         except Exception as exc:  # noqa: BLE001 - 上游失败收成信封，绝不打断业务图
             logger.warning("eastmoney_call_failed op=%s reason=%s", name, sanitize_error(exc))
             return wrap_envelope(exc)
+        if self._cache_ttl > 0:
+            self._cache[key] = (now + self._cache_ttl, envelope)
+        return envelope
 
 
 def operation_catalog() -> dict[str, str]:

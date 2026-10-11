@@ -7,6 +7,7 @@ import asyncio
 import httpx
 
 from app.mcp.eastmoney import EastmoneyClient, operation_catalog
+from app.mcp.eastmoney import _RETRIES as RETRIES
 
 _BREADTH_BODY = {
     "rc": 0,
@@ -134,7 +135,64 @@ def test_persistent_disconnect_degrades_after_retries():
     client = EastmoneyClient(transport=httpx.MockTransport(handler))
     payload = asyncio.run(client.call("market_breadth"))
     assert payload["ok"] is False
-    assert state["attempts"] == 2
+    assert state["attempts"] == RETRIES
+
+
+def test_host_failover_moves_to_next_mirror():
+    """首个镜像被断开时应自动换下一个域名重试，而不是直接降级。"""
+    seen_hosts: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen_hosts.append(request.url.host)
+        if request.url.host == "push2.eastmoney.com":
+            raise httpx.ConnectError("dropped", request=request)
+        return httpx.Response(200, json=_BREADTH_BODY)
+
+    client = EastmoneyClient(transport=httpx.MockTransport(handler))
+    payload = asyncio.run(client.call("market_breadth"))
+    assert payload["ok"] is True
+    assert seen_hosts[:2] == ["push2.eastmoney.com", "push2delay.eastmoney.com"]
+
+
+def test_successful_result_is_cached_within_ttl():
+    calls = {"count": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["count"] += 1
+        return httpx.Response(200, json=_BREADTH_BODY)
+
+    client = EastmoneyClient(transport=httpx.MockTransport(handler))
+    first = asyncio.run(client.call("market_breadth"))
+    second = asyncio.run(client.call("market_breadth"))
+    assert first["ok"] and second["ok"]
+    assert calls["count"] == 1
+
+
+def test_failures_are_not_cached():
+    """失败不缓存，否则一次抖动会把降级结果钉在缓存里。"""
+    calls = {"count": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["count"] += 1
+        raise httpx.ConnectError("dropped", request=request)
+
+    client = EastmoneyClient(transport=httpx.MockTransport(handler))
+    asyncio.run(client.call("market_breadth"))
+    asyncio.run(client.call("market_breadth"))
+    assert calls["count"] == 2 * RETRIES
+
+
+def test_requests_carry_browser_headers():
+    seen: list[httpx.Headers] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.headers)
+        return httpx.Response(200, json=_BREADTH_BODY)
+
+    client = EastmoneyClient(transport=httpx.MockTransport(handler))
+    asyncio.run(client.call("market_breadth"))
+    assert seen and seen[0].get("referer") == "https://quote.eastmoney.com/"
+    assert "Mozilla" in seen[0].get("user-agent", "")
 
 
 def test_operation_catalog_lists_registered_datasets():

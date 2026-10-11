@@ -112,13 +112,12 @@ function signed(value: unknown): string {
     </section>
 
     <section class="card">
-      <h3>风险</h3>
+      <h3>风险与限制</h3>
       <ul v-if="view.risks.length" class="risks">
         <li v-for="item in view.risks" :key="item">{{ item }}</li>
       </ul>
-      <p v-else class="empty">
-        {{ overview.sentiment_input || overview.as_of || '按指数与广度观察，不编造涨跌。' }}
-      </p>
+      <!-- 无风险/限制时只给中性文案；数据截止时间由回答正文的「数据截止」承载，不在此重复。 -->
+      <p v-else class="empty">本次未发现额外风险提示。</p>
     </section>
   </div>
 </template>
