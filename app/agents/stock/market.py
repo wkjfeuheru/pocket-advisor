@@ -95,6 +95,10 @@ def build_market_overview(
     industry = _leaders(list((sectors or {}).get("industry") or []))
     concept = _leaders(list((sectors or {}).get("concept") or []))
     as_of = str(breadth.get("as_of") or (kept[0]["as_of"] if kept else now.isoformat()))
+    # 来源随实际取数通道变化：指数来自 Fuyao，广度和板块可能来自东财等补充源。
+    sources = {str(item.get("source") or "") for item in kept}
+    sources.update({str(breadth.get("source") or ""), str(sectors.get("source") or "")})
+    sources.discard("")
     return {
         "failed": not bool(kept),
         "indices": kept,
@@ -117,7 +121,7 @@ def build_market_overview(
             "as_of": sectors.get("as_of"),
         },
         "as_of": as_of,
-        "sources": ["fuyao"],
+        "sources": sorted(sources) or ["fuyao"],
         "warnings": list(dict.fromkeys(warnings)),
     }
 

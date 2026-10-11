@@ -6,6 +6,8 @@ python-dotenv>=1.2.3
 fastapi>=0.141.1
 uvicorn[standard]>=0.54.0
 pydantic>=2.13.5
+# 东方财富补充数据源直连（公开只读接口），httpx 已是 mcp 的传递依赖。
+httpx>=0.28
 langchain>=1.0,<2
 langgraph>=1.0,<2
 langchain-openai>=1.0,<2

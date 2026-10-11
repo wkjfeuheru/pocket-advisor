@@ -12,7 +12,20 @@ from app.mcp.fuyao import operation_for_tool_name
 DEFAULT_INDICES = ("000001.SH", "399001.SZ", "399006.SZ", "000300.SH")
 
 
-async def collect_market_evidence(store, context, tools, slots) -> StockAgentResponse:
+async def _fetch_auxiliary(client, name: str) -> dict | None:
+    """用补充数据源抓取一项聚合口径。
+
+    主数据源（Fuyao）不提供涨跌家数与板块行情，这里由东财补齐；
+    未注入客户端或上游失败时返回 None，保留原来的降级提示，绝不编造。
+    """
+    if client is None:
+        return None
+    envelope = await client.call(name)
+    data = envelope.get("data") if envelope.get("ok") else None
+    return dict(data) if isinstance(data, dict) else None
+
+
+async def collect_market_evidence(store, context, tools, slots, *, eastmoney=None) -> StockAgentResponse:
     """已有指数足以构成部分市场概览；缺失广度和板块只限制相应结论。"""
     snapshot = next((t for t in tools if "index_prices_snapshot" in t.name), None)
     calendar = next((t for t in tools if operation_for_tool_name(t.name) == "trade_calendar"), None)
@@ -66,7 +79,10 @@ async def collect_market_evidence(store, context, tools, slots) -> StockAgentRes
     last_day = trading_dates[-1] if trading_dates else ""
     clock = now.strftime("%H:%M")
     session = "open" if last_day == now.date().isoformat() and ("09:30" <= clock <= "11:30" or "13:00" <= clock <= "15:00") else "closed"
-    result = build_market_overview(indices=quotes, breadth=None, sectors=None, now=now, session=session)
+    # 广度与板块由补充数据源补齐；取不到就保持 None，让概览层如实降级。
+    breadth = await _fetch_auxiliary(eastmoney, "market_breadth")
+    sectors = await _fetch_auxiliary(eastmoney, "sector_overview")
+    result = build_market_overview(indices=quotes, breadth=breadth, sectors=sectors, now=now, session=session)
     result["last_calendar_trade_date"] = last_day
     result["snapshot_time"] = result["as_of"]
     if slots.get("timeframe"):
@@ -99,10 +115,16 @@ async def collect_market_evidence(store, context, tools, slots) -> StockAgentRes
             result["warnings"] = [w for w in result["warnings"] if w != "fuyao_unavailable"]
             result["warnings"].append("最新指数快照暂不可用，以下仅展示所请求区间内的历史数据。")
     aggregate = await asyncio.to_thread(store.put, context, tool_call_id="market:aggregate", tool_name="aggregate_market_snapshot",
-        evidence_type="market_overview", payload=result, source="fuyao", as_of=result["as_of"], arguments={"evidence_ids": [r["id"] for r in rows]})
+        evidence_type="market_overview", payload=result, source=",".join(result["sources"]), as_of=result["as_of"],
+        arguments={"evidence_ids": [r["id"] for r in rows]})
     moves = [float(item["change_pct"]) for item in result["indices"] if isinstance(item.get("change_pct"), (int, float))]
     summary = "已核验的主要指数整体上涨。" if moves and all(v > 0 for v in moves) else "已核验的主要指数整体下跌。" if moves and all(v < 0 for v in moves) else "已核验的主要指数表现分化。" if moves else "指数行情暂不可用。"
-    summary += "这是最新快照的表现，不能直接推断近期连续走势；广度与板块数据不足，暂不评价全市场情绪或轮动。"
+    summary += "这是最新快照的表现，不能直接推断近期连续走势。"
+    # 只对确实缺失的口径声明限制，避免有了数据还挂着"数据不足"的降级话术。
+    if result["breadth"].get("up") is None:
+        summary += "广度数据不足，暂不评价全市场情绪。"
+    if not result["sectors"].get("industry"):
+        summary += "板块数据不足，暂不评价板块轮动。"
     if result.get("historical_indices"):
         summary += "历史区间仅根据返回的有效交易日收盘序列分析，不与最新快照直接拼接。"
     return StockAgentResponse(scenario="market_overview", summary=summary, evidence_ids=[aggregate["id"]],

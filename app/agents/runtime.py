@@ -175,7 +175,10 @@ async def init_agents() -> AgentRuntime:
         stock_agent = None
         try:
             evidence_store = get_agent_evidence_store()
-            local_tools = build_stock_local_tools(store=evidence_store, tushare=tushare, warehouse=warehouse)
+            from app.mcp.eastmoney import get_eastmoney_client
+
+            local_tools = build_stock_local_tools(store=evidence_store, tushare=tushare, warehouse=warehouse,
+                                                  eastmoney=get_eastmoney_client())
             evidence_middleware = build_evidence_middleware(
                 evidence_store,
                 {str(getattr(tool, "name", "")) for tool in mcp_tools},

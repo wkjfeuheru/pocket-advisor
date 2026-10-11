@@ -18,6 +18,7 @@ from app.agents.stock.market import build_market_overview, session_from_calendar
 from app.agents.stock.screening import screen_candidates
 from app.agents.stock.technical import compute_technicals
 from app.crud.stock_feature_crud import SnapshotStaleError
+from app.mcp.eastmoney import SOURCE as EASTMONEY_SOURCE, get_eastmoney_client, operation_catalog
 
 STOCK_AGENT_VERSION = "stock-react-v1"
 _CLARIFICATION_FIELDS = {
@@ -131,7 +132,8 @@ def _symbol(payload: Any) -> str:
     return ""
 
 
-def build_stock_local_tools(*, store: Any, tushare: Any = None, warehouse: Any = None) -> list[Any]:
+def build_stock_local_tools(*, store: Any, tushare: Any = None, warehouse: Any = None,
+                            eastmoney: Any = None) -> list[Any]:
     @tool
     def request_stock_clarification(
         reason: str,
@@ -374,6 +376,28 @@ def build_stock_local_tools(*, store: Any, tushare: Any = None, warehouse: Any =
         return _save(store, name="score_stock_candidates", evidence_type="stock_screening",
                      payload=payload, source="snapshot", as_of=str(payload.get("as_of") or ""))
 
+    @tool
+    async def web_search(dataset: str, top: int = 5) -> dict[str, Any]:
+        """东方财富公开数据的补充查询（只读）。
+
+        当主数据源（Fuyao/Tushare）缺少某项聚合口径时，用它补取；
+        当主数据源已经给出同一口径时不要重复调用。dataset 取值见工具描述，top 仅对板块榜生效。
+        """
+        client = eastmoney or get_eastmoney_client()
+        envelope = await client.call(str(dataset), top=max(1, min(int(top), 20)))
+        if envelope.get("ok"):
+            payload: dict[str, Any] = {"data": envelope["data"], "source": EASTMONEY_SOURCE,
+                                       "as_of": str(envelope.get("as_of") or "")}
+        else:
+            payload = {"failed": True, "data": None, "warning": "upstream_data_unavailable",
+                       "source": EASTMONEY_SOURCE, "as_of": ""}
+        return _save(store, name="web_search", evidence_type="market_auxiliary", payload=payload,
+                     source=EASTMONEY_SOURCE, as_of=str(payload.get("as_of") or ""))
+
+    # 数据集清单随操作注册表生成，新增东财数据集时工具描述自动同步。
+    web_search.description = "东方财富补充数据（只读）。可用 dataset：" + "；".join(
+        f"{name}（{summary}）" for name, summary in operation_catalog().items())
+
     return [
         request_stock_clarification,
         calculate_technical_indicators,
@@ -381,6 +405,7 @@ def build_stock_local_tools(*, store: Any, tushare: Any = None, warehouse: Any =
         collect_stock_events,
         aggregate_market_snapshot,
         score_stock_candidates,
+        web_search,
     ]
 
 

@@ -230,3 +230,68 @@ async def test_repeat_guard_allows_different_arguments_and_reuses_identical_quer
         assert len(called) == 4
     finally:
         reset_stock_execution(token)
+
+
+@pytest.mark.asyncio
+async def test_market_overview_fills_breadth_and_sectors_from_auxiliary_source():
+    from types import SimpleNamespace
+    from app.agents.stock.evidence_store import EvidenceContext, MemoryAgentEvidenceStore
+    from app.agents.stock.market_fetch import collect_market_evidence
+
+    class _FakeAuxiliary:
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        async def call(self, name, **params):
+            self.calls.append(name)
+            if name == "market_breadth":
+                return {"ok": True, "data": {"up": 3347, "down": 2159, "unchanged": 130,
+                    "source": "eastmoney", "as_of": "2026-10-09T15:00:00+08:00"}}
+            return {"ok": True, "data": {"industry": [{"name": "视频媒体", "change_pct": 19.98}],
+                "concept": [{"name": "AI语料", "change_pct": 6.07}],
+                "source": "eastmoney", "as_of": "2026-10-09T15:00:00+08:00"}}
+
+    async def snapshot(args):
+        return {"code": 0, "data": {"timestamp": "2026-10-09T15:00:00+08:00",
+            "item": [{"thscode": "000001.SH", "last_price": 3813.79, "price_change_ratio_pct": 0.05}]}}
+    async def calendar(args):
+        return {"code": 0, "data": {"item": [{"date": "20261009"}]}}
+    tools = [SimpleNamespace(name="fuyao_a_share_index_get_a_share_index_prices_snapshot", ainvoke=snapshot),
+        SimpleNamespace(name="fuyao_a_share_get_a_share_calendar_trading_days", ainvoke=calendar)]
+    store = MemoryAgentEvidenceStore()
+    ctx = EvidenceContext("r", "s", "c")
+    auxiliary = _FakeAuxiliary()
+    response = await collect_market_evidence(store, ctx, tools, {}, eastmoney=auxiliary)
+    row = store.get(response.evidence_ids[0], ctx)
+    payload = row["payload"]
+    assert not response.failed
+    assert payload["breadth"]["up"] == 3347
+    assert payload["sectors"]["industry"][0]["name"] == "视频媒体"
+    assert set(payload["sources"]) == {"fuyao", "eastmoney"}
+    assert row["source"] == "eastmoney,fuyao"
+    assert not any("涨跌家数暂不可用" in item for item in payload["warnings"])
+    assert not any("板块行情暂不可用" in item for item in payload["warnings"])
+    assert auxiliary.calls == ["market_breadth", "sector_overview"]
+
+
+@pytest.mark.asyncio
+async def test_auxiliary_source_failure_keeps_honest_warnings():
+    from types import SimpleNamespace
+    from app.agents.stock.evidence_store import EvidenceContext, MemoryAgentEvidenceStore
+    from app.agents.stock.market_fetch import collect_market_evidence
+
+    class _BrokenAuxiliary:
+        async def call(self, name, **params):
+            return {"ok": False, "code": "unavailable", "data": None, "warning": "boom", "as_of": ""}
+
+    async def snapshot(args):
+        return {"code": 0, "data": {"timestamp": "2026-10-09T15:00:00+08:00",
+            "item": [{"thscode": "000001.SH", "last_price": 3813.79, "price_change_ratio_pct": 0.05}]}}
+    tools = [SimpleNamespace(name="fuyao_a_share_index_get_a_share_index_prices_snapshot", ainvoke=snapshot)]
+    store = MemoryAgentEvidenceStore()
+    ctx = EvidenceContext("r", "s", "c")
+    response = await collect_market_evidence(store, ctx, tools, {}, eastmoney=_BrokenAuxiliary())
+    payload = store.get(response.evidence_ids[0], ctx)["payload"]
+    assert payload["breadth"]["up"] is None
+    assert any("涨跌家数暂不可用" in item for item in payload["warnings"])
+    assert any("板块行情暂不可用" in item for item in payload["warnings"])

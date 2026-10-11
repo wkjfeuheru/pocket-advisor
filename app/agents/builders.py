@@ -257,7 +257,9 @@ def stock_agent_runner(stock_agent: Any, evidence_store: Any, *, warning: str = 
                 slots = state.get("domain_slots") or {}
                 if slots.get("scenario") == "market_overview" and market_tools is not None:
                     from app.agents.stock.market_fetch import collect_market_evidence
-                    result = {"structured_response": await collect_market_evidence(evidence_store, context, market_tools, slots)}
+                    from app.mcp.eastmoney import get_eastmoney_client
+                    result = {"structured_response": await collect_market_evidence(
+                        evidence_store, context, market_tools, slots, eastmoney=get_eastmoney_client())}
                 else:
                     result = await stock_agent.ainvoke(
                         _worker_input(task, state, store=evidence_store, context=context), inner_config)
